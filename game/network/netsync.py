@@ -19,9 +19,9 @@ import time
 
 from ursina import Vec3, color
 
-import config as C
-import fx
-from combat import Beam, Projectile, Wave, Zone, heal_fx
+from game import config as C
+from game.world import fx
+from game.pokemon.combat import Beam, Projectile, Wave, Zone, heal_fx
 
 # ---------------------------------------------------------------- format des paquets
 HEAD = struct.Struct('<IdB')          # numéro, horloge de l'hôte, contient l'état général ?
@@ -38,6 +38,14 @@ OWNER = {None: 0, 'rouge': 1, 'bleu': 2}
 OWNER_KEY = {0: None, 1: 'rouge', 2: 'bleu'}
 BUFFS = ('braise', 'flux', 'bastion', 'psy')
 ALIVE, ENABLED, VISIBLE, MOVING, ATTACK, CHARGE, STUN, BURN, SLOW = (1 << i for i in range(9))
+
+
+def _num(v, lim=C.FIELD_RADIUS + 10):
+    """Nombre reçu de l'invité : fini et borné (sinon ValueError, le message est ignoré)."""
+    v = float(v)
+    if not math.isfinite(v):
+        raise ValueError
+    return max(-lim, min(lim, v))
 
 
 def col_in(c):
@@ -120,10 +128,10 @@ class HostSync:
         elif t == 'use' and r is not None and r.alive:
             p = msg.get('p')
             if p:
-                r.brain.receive(r.brain.life, float(p[0]), float(p[1]), r.brain.net_rot, r.brain.net_moving)
+                r.brain.receive(r.brain.life, _num(p[0]), _num(p[1]), r.brain.net_rot, r.brain.net_moving)
                 r.brain.follow(1.0)           # l'attaque part d'où l'invité l'a lancée
             d = msg.get('d') or (0, 0)
-            r.brain.remote_use(str(msg.get('k')), int(msg.get('tg', -1)), float(d[0]), float(d[1]))
+            r.brain.remote_use(str(msg.get('k')), int(msg.get('tg', -1)), _num(d[0], 1), _num(d[1], 1))
         elif t == 'dash' and r is not None:
             r.brain.remote_dash()
         elif t == 'pong':

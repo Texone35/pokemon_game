@@ -12,8 +12,7 @@ import atexit
 from panda3d.core import AntialiasAttrib, loadPrcFileData
 from ursina import Entity, Sky, Text, Ursina, camera, color, invoke, scene, window
 
-import config as C
-
+from game import config as C
 # Anticrénelage matériel (MSAA) : très coûteux sur certaines puces graphiques
 # intégrées (Intel), donc désactivé par défaut. Mettre MSAA = 4 pour l'activer.
 MSAA = C.QUALITY['msaa']
@@ -25,10 +24,10 @@ app = Ursina(title='Pokémon Dominion', size=C.WINDOW_SIZE, borderless=False,
              development_mode=False, vsync=True)
 
 # les modules suivants créent des shaders/entités : ils doivent être importés après Ursina()
-from geometry import set_environment, setup_sun, unfreeze_shadows, update_camera_uniform  # noqa: E402
-from lobby import Lobby                         # noqa: E402
-from match import Match                         # noqa: E402
-from ui import Banner                           # noqa: E402
+from game.interface.lobby import Lobby                                                         # noqa: E402
+from game.interface.widgets import Banner                                                      # noqa: E402
+from game.match import Match                                                                   # noqa: E402
+from game.world.geometry import set_environment, setup_sun, unfreeze_shadows, update_camera_uniform  # noqa: E402
 
 SKY = (.55, .72, .95, 1)
 

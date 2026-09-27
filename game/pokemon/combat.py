@@ -17,9 +17,9 @@ import random
 
 from ursina import Entity, Vec3, color, destroy
 
-import fx
-from fx import explosion, glow_sprite, lightning, orient, rnd, style
-from geometry import MeshBuilder, flat_circle
+from game.world import fx
+from game.world.fx import explosion, glow_sprite, lightning, orient, rnd, style
+from game.world.geometry import MeshBuilder, flat_circle
 
 
 def flat(v):

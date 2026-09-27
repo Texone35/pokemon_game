@@ -5,7 +5,7 @@ import random
 
 from ursina import Entity, Vec3, color, curve, destroy
 
-from geometry import MeshBuilder
+from game.world.geometry import MeshBuilder
 
 
 def ring_mesh(parent, col, emissive=.8):

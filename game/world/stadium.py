@@ -3,8 +3,16 @@
 Disposition (voir config.py) : 5 arènes ouvertes (Nord, Ouest, Est, Sud-Ouest,
 Sud-Est), les bases des deux équipes au sud, le Boss Pit au centre, une
 rivière peu profonde (praticable) du nord au sud, des voies principales et une
-jungle dense avec ses camps de Pokémon neutres. Le tout est entouré par les
+jungle avec ses camps de Pokémon neutres. Le tout est entouré par les
 tribunes du stade.
+
+Jungle (façon MOBA) : des massifs infranchissables (falaises rocheuses ou
+rideaux d'arbres) séparés par des couloirs étroits et quelques clairières.
+Les couloirs sont les arêtes d'un diagramme de Voronoï dont les graines sont
+symétriques (Ouest / Est). Les murs sont décrits par une fonction distance
+signée (self.wall_sdf) qui sert à la fois aux collisions, à la navigation et
+au décor. Des hautes herbes (buissons) cachent les Pokémon qui s'y trouvent
+aux yeux de l'équipe adverse (voir bush_at et Match._update_bushes).
 
 Tout le décor est procédural : des primitives (boîtes, sphères, cônes...)
 fusionnées par MeshBuilder en quelques gros maillages.
@@ -17,18 +25,24 @@ import math
 import random
 
 import numpy as np
+from scipy import ndimage
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
+from scipy.spatial import cKDTree
 from ursina import Vec3, color, lerp
 
-import config as C
-from emblems import add_emblem
-from fx import Flow
-from geometry import ChunkedBuilder, MeshBuilder
+from game import config as C
+from game.world.emblems import add_emblem
+from game.world.fx import Flow
+from game.world.geometry import ChunkedBuilder, MeshBuilder
 
 F = C.FIELD_RADIUS
 CELL = 8.0            # grille de collision
 NAV_CELL = 2.0        # grille de navigation
+J_RES = .5            # finesse de la carte des murs et des buissons de la jungle
+CORRIDOR = 3.0        # demi-largeur des couloirs de la jungle
+SEED_GAP = 18.0       # écart entre les graines des massifs (plus grand = massifs plus gros)
+CLOSED_EDGES = .2    # part des couloirs possibles qui restent fermés
 
 # ---------------------------------------------------------------- palette
 LAWN1, LAWN2 = color.rgb(.42, .72, .27), color.rgb(.35, .64, .22)
@@ -55,6 +69,9 @@ NAVY = color.rgb(.17, .19, .36)
 NAVY2 = color.rgb(.23, .25, .46)
 TREE_GREENS = [color.rgb(.13, .45, .16), color.rgb(.18, .52, .18), color.rgb(.1, .4, .2),
                color.rgb(.22, .56, .2), color.rgb(.15, .48, .12), color.rgb(.26, .6, .22)]
+CLIFF = color.rgb(.5, .47, .44)
+BUSH_GREENS = [color.rgb(.16, .5, .38), color.rgb(.2, .58, .4), color.rgb(.13, .44, .34),
+               color.rgb(.26, .62, .42)]
 
 
 def seg_dist(px, pz, ax, az, bx, bz):
@@ -75,6 +92,27 @@ def polyline_dist_np(x, z, pts):
         L2 = dx * dx + dz * dz or 1
         t = np.clip(((x - ax) * dx + (z - az) * dz) / L2, 0, 1)
         d = np.minimum(d, np.hypot(x - ax - dx * t, z - az - dz * t))
+    return d
+
+
+def polyline_dist_grid(xs, pts, cap):
+    """Comme polyline_dist_np sur la grille carrée xs × xs, mais seulement près du tracé :
+    au-delà de `cap`, la distance vaut `cap` (beaucoup plus rapide sur une grande grille)."""
+    d = np.full((len(xs), len(xs)), float(cap))
+    step, x0 = xs[1] - xs[0], xs[0]
+    for (ax, az), (bx, bz) in zip(pts, pts[1:]):
+        i0 = max(0, int((min(ax, bx) - cap - x0) / step))
+        i1 = min(len(xs), int((max(ax, bx) + cap - x0) / step) + 2)
+        j0 = max(0, int((min(az, bz) - cap - x0) / step))
+        j1 = min(len(xs), int((max(az, bz) + cap - x0) / step) + 2)
+        if i0 >= i1 or j0 >= j1:
+            continue
+        x, z = np.meshgrid(xs[i0:i1], xs[j0:j1], indexing='ij')
+        dx, dz = bx - ax, bz - az
+        L2 = dx * dx + dz * dz or 1
+        t = np.clip(((x - ax) * dx + (z - az) * dz) / L2, 0, 1)
+        sub = d[i0:i1, j0:j1]
+        np.minimum(sub, np.hypot(x - ax - dx * t, z - az - dz * t), out=sub)
     return d
 
 
@@ -156,6 +194,7 @@ class Stadium:
         self.paths = []          # chemins secondaires (points, largeur)
         self.flows = []
         self._plan_paths()
+        self._plan_jungle()
         self._build_heightmap()
         self._new_builders()
         self._build_ground()
@@ -205,7 +244,27 @@ class Stadium:
                     yield o
 
     def blocked(self, x, z, r):
+        if self.wall_dist(x, z) > -r:
+            return True
         return any(math.hypot(x - ox, z - oz) < orad + r for ox, oz, orad in self.nearby(x, z, r))
+
+    def _jcell(self, x, z):
+        fx = min(max((x - self.j_min) / J_RES, 0), self.j_n - 1.001)
+        fz = min(max((z - self.j_min) / J_RES, 0), self.j_n - 1.001)
+        i, j = int(fx), int(fz)
+        return i, j, fx - i, fz - j
+
+    def wall_dist(self, x, z):
+        """Distance signée aux murs de la jungle : > 0 dans un massif, < 0 dans un passage."""
+        i, j, tx, tz = self._jcell(x, z)
+        a = self.wall_sdf
+        return float(a[i, j] * (1 - tx) * (1 - tz) + a[i + 1, j] * tx * (1 - tz)
+                     + a[i, j + 1] * (1 - tx) * tz + a[i + 1, j + 1] * tx * tz)
+
+    def bush_at(self, x, z):
+        """Numéro du buisson (hautes herbes) en (x, z), 0 si aucun."""
+        i, j, tx, tz = self._jcell(x, z)
+        return int(self.bush_grid[i + (tx > .5), j + (tz > .5)])
 
     def collide(self, pos, radius=.5):
         """Repousse la position hors des obstacles et dans le terrain."""
@@ -214,6 +273,17 @@ class Stadium:
         if r > lim:
             pos.x *= lim / r
             pos.z *= lim / r
+        for _ in range(2):              # murs de la jungle : on glisse le long de leur bord
+            s = self.wall_dist(pos.x, pos.z) + radius
+            if s <= 0:
+                break
+            i, j, _, _ = self._jcell(pos.x, pos.z)
+            gx, gz = self.wall_gx[i, j], self.wall_gz[i, j]
+            g = math.hypot(gx, gz)
+            if g < 1e-6:
+                break
+            pos.x -= gx / g * s
+            pos.z -= gz / g * s
         for ox, oz, orad in self.nearby(pos.x, pos.z, radius):
             dx, dz = pos.x - ox, pos.z - oz
             d = math.hypot(dx, dz)
@@ -234,29 +304,172 @@ class Stadium:
         return True
 
     # ================================================================ espaces libres
-    def _open_space(self, x, z, margin=0.0):
-        """Vrai si (x, z) est hors de toute zone de jeu ouverte (donc dans la jungle)."""
+    def _open_np(self, xs):
+        """Distance signée, sur la grille xs × xs, aux zones de jeu ouvertes : voies et leurs
+        pelouses, rivière, chemins des camps, arènes, bases, Boss Pit et camps (< 0 à l'intérieur),
+        limitée à une vingtaine d'unités. Renvoie aussi la distance au dallage des voies, au bord
+        de l'eau et aux zones rondes (arènes, bases...)."""
+        cap = 20
+        x, z = np.meshgrid(xs, xs, indexing='ij')
+        pave = np.full(x.shape, 1e9)
         for pts, w in LANES:
-            if polyline_dist(x, z, pts) < w / 2 + 2.4 + margin:
-                return False
+            pave = np.minimum(pave, polyline_dist_grid(xs, pts, cap) - w / 2 - .7)
+        water = np.full(x.shape, 1e9)
         for pts, w in RIVERS:
-            if polyline_dist(x, z, pts) < w / 2 + 1.8 + margin:
-                return False
+            water = np.minimum(water, polyline_dist_grid(xs, pts, cap) - w / 2)
+        o = np.minimum(pave - 1.7, water - 1.8)
         for pts, w in self.paths:
-            if polyline_dist(x, z, pts) < w / 2 + 1.2 + margin:
-                return False
+            o = np.minimum(o, polyline_dist_grid(xs, pts, cap) - w / 2 - 1.2)
+        discs = np.full(x.shape, 1e9)
         for a in C.ARENAS:
-            if math.hypot(x - a['pos'][0], z - a['pos'][1]) < C.ARENA_RADIUS + 9 + margin:
-                return False
+            discs = np.minimum(discs, np.hypot(x - a['pos'][0], z - a['pos'][1]) - C.ARENA_RADIUS - 12)
         for t in C.TEAMS.values():
-            if math.hypot(x - t['base'][0], z - t['base'][1]) < C.BASE_RADIUS + 7 + margin:
-                return False
-        if math.hypot(x, z) < C.PIT_RADIUS + 9 + margin:
-            return False
+            discs = np.minimum(discs, np.hypot(x - t['base'][0], z - t['base'][1]) - C.BASE_RADIUS - 7)
+        discs = np.minimum(discs, np.hypot(x, z) - C.PIT_RADIUS - 9)
         for c in C.CAMPS:
-            if math.hypot(x - c['pos'][0], z - c['pos'][1]) < 7.5 + margin:
-                return False
-        return True
+            discs = np.minimum(discs, np.hypot(x - c['pos'][0], z - c['pos'][1]) - 7.5)
+        return np.minimum(o, discs), pave, water, discs
+
+    def _plan_jungle(self):
+        """Tracé de la jungle : massifs infranchissables, couloirs, clairières et buissons."""
+        rng = random.Random(7)
+        n = F + 6
+        xs = np.arange(-n, n + J_RES / 2, J_RES)
+        X, Z = np.meshgrid(xs, xs, indexing='ij')
+        self.j_min, self.j_n = -n, len(xs)
+        open_d, pave, water, discs = self._open_np(xs)
+
+        def at(arr, x, z):
+            i = int(round((x + n) / J_RES))
+            j = int(round((z + n) / J_RES))
+            return arr[min(max(i, 0), len(xs) - 1), min(max(j, 0), len(xs) - 1)]
+
+        # graines des massifs, symétriques Ouest / Est (sur l'axe si elles en sont trop près)
+        seeds = []
+        for _ in range(6000):
+            x, z = rng.uniform(-F, 0), rng.uniform(-F, F)
+            if math.hypot(x, z) > F - 3 or at(open_d, x, z) < 2.5:
+                continue
+            if x > -SEED_GAP / 2:
+                x = 0.0
+            if all(math.hypot(x - sx, z - sz) > SEED_GAP for sx, sz in seeds):
+                seeds.append((x, z))
+                if x:
+                    seeds.append((-x, z))
+        pts = np.stack([X.ravel(), Z.ravel()], -1)
+        tree = cKDTree(seeds)
+        (d1, d2), (i1, i2) = (a.T for a in tree.query(pts, k=2))
+        s = np.array(seeds)
+        gap = np.linalg.norm(s[i1] - s[i2], axis=1)
+        corridor = ((d2 ** 2 - d1 ** 2) / (2 * gap)).reshape(X.shape) - CORRIDOR   # distance à l'arête
+        # certaines arêtes restent fermées : massifs plus grands, culs-de-sac (fermetures symétriques)
+        mir = [seeds.index((-x, z)) for x, z in seeds]
+        closed = np.zeros((len(seeds), len(seeds)), bool)
+        for a in range(len(seeds)):
+            for b in range(a + 1, len(seeds)):
+                if sorted((mir[a], mir[b])) < [a, b]:
+                    continue                    # paire miroir déjà tirée
+                if np.hypot(*(s[a] - s[b])) < SEED_GAP * 1.9 and rng.random() < CLOSED_EDGES:
+                    for p, q in ((a, b), (mir[a], mir[b])):
+                        closed[p, q] = closed[q, p] = True
+        corridor = np.where(closed[i1, i2].reshape(X.shape), 1e9, corridor)
+        # clairières : quelques carrefours de couloirs élargis
+        clear = np.full(X.shape, 1e9)
+        self.clearings = []
+        ok = (X < 0) & (corridor < -2.2) & (open_d > 6) & (np.hypot(X, Z) < F - 8)
+        cand = list(zip(X[ok][::7].tolist(), Z[ok][::7].tolist()))
+        rng.shuffle(cand)
+        for x, z in cand:
+            if len(self.clearings) >= 16:
+                break
+            if all(math.hypot(x - cx, z - cz) > 26 for cx, cz, _ in self.clearings):
+                r = rng.uniform(4.2, 5.6)
+                self.clearings += [(x, z, r), (-x, z, r)]
+        for cx, cz, r in self.clearings:
+            clear = np.minimum(clear, np.hypot(X - cx, Z - cz) - r)
+        walk = np.minimum(np.minimum(open_d, corridor), clear) < 0
+        walk |= np.hypot(X, Z) > F - 1.5          # pied des tribunes (hors du terrain)
+        solid = ~walk
+        # on retire les massifs trop fins et on bouche les recoins inaccessibles
+        lab, k = ndimage.label(solid)
+        inner = ndimage.distance_transform_edt(solid) * J_RES
+        if k:
+            thick = ndimage.maximum(inner, lab, np.arange(1, k + 1))
+            area = ndimage.sum(np.ones_like(inner), lab, np.arange(1, k + 1)) * J_RES ** 2
+            keep = np.concatenate([[False], (thick > 1.4) & (area > 14)])
+            solid = keep[lab]
+        lab, k = ndimage.label(~solid & (np.hypot(X, Z) < F - 2.5))
+        if k > 1:
+            sizes = ndimage.sum(np.ones(lab.shape), lab, np.arange(1, k + 1))
+            main = 1 + int(np.argmax(sizes))
+            solid |= (lab != main) & (lab > 0)
+        # distance signée aux murs (> 0 dans un massif)
+        sdf = (ndimage.distance_transform_edt(solid) - ndimage.distance_transform_edt(~solid)) * J_RES
+        sdf = np.where(solid, sdf - J_RES / 2, sdf + J_RES / 2)
+        self.wall_sdf = ndimage.gaussian_filter(sdf, .8)
+        self.wall_gx, self.wall_gz = np.gradient(self.wall_sdf, J_RES)
+        self.jX, self.jZ, self.j_open = X, Z, open_d
+        self._plan_bushes(rng, X, Z, pave, water, discs, at)
+
+    def _plan_bushes(self, rng, X, Z, pave, water, discs, at):
+        """Hautes herbes : au bord des voies, dans les couloirs, les clairières et près de la rivière."""
+        sdf = self.wall_sdf
+        cands = []                     # (priorité, x, z, rayon) côté Ouest, puis mis en miroir
+        for pts, w in LANES:
+            for (ax, az), (bx, bz) in zip(pts, pts[1:]):
+                L = math.hypot(bx - ax, bz - az)
+                for k in range(int(L / 3)):
+                    t = (k + .5) * 3 / L
+                    cx, cz = ax + (bx - ax) * t, az + (bz - az) * t
+                    for sd in (-1, 1):
+                        off = w / 2 + 3.2
+                        x = cx + (bz - az) / L * sd * off
+                        z = cz - (bx - ax) / L * sd * off
+                        if x < -1:
+                            cands.append((0, x, z, rng.uniform(2.1, 2.7), (bx - ax) / L, (bz - az) / L))
+        for pts, w in RIVERS[2:]:
+            for (ax, az), (bx, bz) in zip(pts, pts[1:]):
+                L = math.hypot(bx - ax, bz - az)
+                for sd in (-1, 1):
+                    x = (ax + bx) / 2 + (bz - az) / L * sd * (w / 2 + 2.6)
+                    z = (az + bz) / 2 - (bx - ax) / L * sd * (w / 2 + 2.6)
+                    if x < -1:
+                        cands.append((1, x, z, rng.uniform(2.0, 2.5), (bx - ax) / L, (bz - az) / L))
+        for cx, cz, r in self.clearings:
+            if cx < 0:
+                a = rng.uniform(0, math.tau)
+                cands.append((0, cx + math.sin(a) * r * .55, cz + math.cos(a) * r * .55, rng.uniform(2.2, 2.7),
+                              math.cos(a), -math.sin(a)))
+        ii, jj = np.nonzero((X < -1) & (sdf > -2.4) & (sdf < -1.2) & (self.j_open > 3))
+        for i, j in zip(ii[::9].tolist(), jj[::9].tolist()):
+            gx, gz = self.wall_gx[i, j], self.wall_gz[i, j]          # le long du mur voisin
+            g = math.hypot(gx, gz) or 1
+            cands.append((2, X[i, j], Z[i, j], rng.uniform(2.0, 2.6), gz / g, -gx / g))
+        rng.shuffle(cands)
+        cands.sort(key=lambda c: c[0])
+        chosen, quota = [], {0: 22, 1: 5, 2: 14}
+        for prio, x, z, r, dx, dz in cands:
+            if quota[prio] <= 0 or math.hypot(x, z) > F - 6:
+                continue
+            if at(sdf, x, z) > -1.0 or at(discs, x, z) < 2 or at(pave, x, z) < .5 or at(water, x, z) < .6:
+                continue
+            if any(math.hypot(x - c[0], z - c[1]) < 18 for c in chosen):
+                continue
+            quota[prio] -= 1
+            chosen += [(x, z, r, dx, dz), (-x, z, r, -dx, dz)]
+        mask = np.zeros(X.shape, bool)
+        for x, z, r, dx, dz in chosen:          # touffe allongée : trois disques alignés
+            m = int(r * 2.4 / J_RES) + 2
+            i, j = int(round((x - self.j_min) / J_RES)), int(round((z - self.j_min) / J_RES))
+            win = np.s_[max(0, i - m):i + m, max(0, j - m):j + m]
+            for k in (-1.2, 0, 1.2):
+                mask[win] |= np.hypot(X[win] - x - dx * k * r, Z[win] - z - dz * k * r) < r * (1 - abs(k) * .12)
+        mask &= (sdf < -.3) & (pave > .2) & (water > .3) & (discs > 0)
+        lab, k = ndimage.label(mask)
+        if k:
+            area = ndimage.sum(mask, lab, np.arange(1, k + 1)) * J_RES ** 2
+            lab = np.where(np.concatenate([[False], area > 5])[lab], lab, 0)
+        self.bush_grid = lab.astype(np.int32)
 
     def _clear_of_lanes(self, x, z, m):
         return all(polyline_dist(x, z, pts) > w / 2 + m for pts, w in LANES)
@@ -331,9 +544,11 @@ class Stadium:
                + (np.sin(X * .21 + Z * .17) * np.sin(Z * .19 - X * .07) * .5 + .5) * 1.0)
         bumps = np.sin(X * .55 + np.sin(Z * .4) * 1.5) * np.sin(Z * .5 + X * .2) * .5 + .5
         flat_d = np.minimum(lane_d, disc_d)
+        # les massifs de la jungle sont surélevés (collines), les couloirs à peine vallonnés
+        wall = _smoothstep(-.5, 5, self._jsample_np(self.wall_sdf, X, Z))
         jungle = _smoothstep(1.5, 9, open_d)
         lawn = _smoothstep(.8, 4.5, np.minimum(flat_d, river_d + 2))
-        H = amp * (big * jungle + bumps * (.35 * lawn + .6 * jungle))
+        H = amp * (big * wall * 1.3 + 1.2 * wall + bumps * (.35 * lawn + .3 * jungle))
         # rivière : lit profond au centre, berges en pente, petit talus juste derrière
         H -= 1.3 * (1 - _smoothstep(-2.4, .9, river_d))
         H += amp * .4 * np.exp(-((river_d - 2.4) / 1.2) ** 2) * _smoothstep(.5, 2.5, flat_d)
@@ -343,6 +558,15 @@ class Stadium:
         # hauteur où l'on marche : comme le sol, sauf sur les voies (planes) et les ponts
         on_lane = lane_d < .4
         self.walk_hm = np.where(on_lane, np.where(river_d < 1.0, BRIDGE_Y, np.maximum(H, 0)), H)
+
+    def _jsample_np(self, arr, x, z):
+        """Lecture interpolée d'une carte de la jungle (grille J_RES) en des points numpy."""
+        fx = np.clip((x - self.j_min) / J_RES, 0, self.j_n - 1.001)
+        fz = np.clip((z - self.j_min) / J_RES, 0, self.j_n - 1.001)
+        i, j = fx.astype(int), fz.astype(int)
+        tx, tz = fx - i, fz - j
+        return (arr[i, j] * (1 - tx) * (1 - tz) + arr[i + 1, j] * tx * (1 - tz)
+                + arr[i, j + 1] * (1 - tx) * tz + arr[i + 1, j + 1] * tx * tz)
 
     def _sample_np(self, arr, x, z):
         fx = np.clip((x - self.hm_min) / HM_RES, 0, self.hm_n - 1.001)
@@ -387,6 +611,12 @@ class Stadium:
         lawn = np.array(tuple(LAWN1)) * (1 - noise) + np.array(tuple(LAWN2)) * noise
         forest = np.array(tuple(FOREST1)) * (1 - noise2) + np.array(tuple(FOREST2)) * noise2
         col = lawn * (1 - jungle) + forest * jungle
+        # couloirs de la jungle : sentier de terre au milieu, mousse au pied des murs
+        wsd = self._jsample_np(self.wall_sdf, x, z)
+        trail = jungle * (1 - _smoothstep(-2.6, -.8, wsd))[..., None] * (.35 + .25 * noise)
+        col = col * (1 - trail) + np.array([.42, .34, .22, 1]) * trail
+        moss = (_smoothstep(-1.2, .5, wsd) * .5)[..., None]
+        col = col * (1 - moss) + np.array([.17, .32, .13, 1]) * moss
         # sommets des collines un peu plus clairs, creux plus sombres
         col[..., :3] *= (.88 + .07 * np.clip(y, -1.2, 3.5))[..., None]
         bank = (1 - _smoothstep(.2, 2.0, river_d))[..., None]
@@ -671,50 +901,12 @@ class Stadium:
 
     # ================================================================ arènes
     def _build_arenas(self):
-        R = C.ARENA_RADIUS
+        """Chaque arène a son décor thématique (voir arenas.py) et deux petites tribunes."""
+        from game.world.arenas import ArenaDecor
         for a in C.ARENAS:
-            t = C.TYPES[a['type']]
             x0, z0 = a['pos']
-            b, glow = self.b, self.glow
-            b.add('cyl_hi', (x0, .03, z0), ((R + 3.6) * 2, .06, (R + 3.6) * 2), col=STONE)
-            # rebord segmenté aux couleurs du type
-            n = 40
-            for i in range(n):
-                ang = i * 360 / n
-                x, z = polar(ang, R + 1.7, x0, z0)
-                col = t['color'] if i % 2 == 0 else lerp(t['color'], color.white, .45)
-                b.add('box', (x, .1, z), (2 * math.pi * (R + 1.7) / n * .92, .14, 2.1), rot=(0, ang, 0), col=col)
-            b.add('ring_97', (x0, .1, z0), ((R + .55) * 2, .16, (R + .55) * 2), col=color.white)
-            # terrain : cercles, rayons, damier et emblème peint au centre
-            b.add('cyl_hi', (x0, .07, z0), (R * 2, .1, R * 2), col=t['floor'])
-            for i in range(24):
-                ang = i * 15
-                x, z = polar(ang, R * .78, x0, z0)
-                col = lerp(t['floor'], t['light'], .22 if i % 2 else .08)
-                b.add('box', (x, .125, z), (2 * math.pi * R * .78 / 24 * .95, .01, R * .34), rot=(0, ang, 0), col=col)
-            for rr_ in (R * .95, R * .6, R * .3):
-                b.add('ring_97', (x0, .13, z0), (rr_ * 2, .02, rr_ * 2), col=lerp(t['light'], color.white, .6))
-            for i in range(12):
-                ang = i * 30
-                x, z = polar(ang, R * .62, x0, z0)
-                b.add('box', (x, .132, z), (.1, .01, R * .64), rot=(0, ang, 0), col=lerp(t['light'], color.white, .5))
-            b.add('cyl_hi', (x0, .12, z0), (R * .58, .02, R * .58), col=lerp(t['floor'], t['light'], .35))
-            emb = MeshBuilder()
-            add_emblem(emb, a['type'], (0, 0, 0), R * .15)
-            emb.entity(parent=self.root, emissive=.55, position=(x0, .16, z0), rotation_x=90, scale=(1, 1, .03))
-            # pylônes lumineux autour (jamais sur une voie)
-            for i in range(10):
-                ang = i * 36 + 18
-                x, z = polar(ang, R + 4.4, x0, z0)
-                if not self._clear_of_lanes(x, z, 1.6):
-                    continue
-                b.add('cyl8', (x, 1.4, z), (.9, 2.8, .9), col=color.rgb(.92, .93, .95))
-                b.add('cyl8', (x, 2.1, z), (1.0, .35, 1.0), col=t['color'])
-                b.add('cone8', (x, 3.15, z), (1.1, .5, 1.1), col=t['dark'])
-                glow.add('sphere_lo', (x, 3.7, z), .5, col=t['light'])
-                self.block(x, z, .6)
-            self._arena_stands(a, t, x0, z0, R)
-            self._arena_props(a['type'], x0, z0, R)
+            self._arena_stands(a, C.TYPES[a['type']], x0, z0, C.ARENA_RADIUS)
+            ArenaDecor(self, a).build()
 
     def _arena_stands(self, a, t, x0, z0, R):
         """Petites tribunes courbes autour de l'arène, là où aucune voie ne passe."""
@@ -753,41 +945,6 @@ class Stadium:
             for k in range(-5, 6, 2):
                 x, z = polar(ang0 + k * 4.5, R + 6.9, x0, z0)
                 self.block(x, z, 1.9)
-
-    def _arena_props(self, k, x0, z0, R):
-        """Décor typique de chaque arène, planté à l'extérieur."""
-        b, glow, rng = self.b, self.glow, self.rng
-        for i in range(14):
-            ang = i * (360 / 14) + rng.uniform(-6, 6)
-            rr = R + 8.5 + rng.uniform(0, 2.5)
-            x, z = polar(ang, rr, x0, z0)
-            if not self._clear_of_lanes(x, z, 2) or self.blocked(x, z, 1.5) or math.hypot(x, z) > F - 5:
-                continue
-            if k == 'roche':
-                for _ in range(3):
-                    self._rock(b, x + rng.uniform(-1, 1), z + rng.uniform(-1, 1), rng.uniform(.8, 1.8), moss=.2)
-                b.add('cone4', (x, 1.8, z), (2.2, 3.6, 2), rot=(0, rng.uniform(0, 90), 0), col=color.rgb(.62, .5, .38))
-            elif k == 'plante':
-                b.add('sphere', (x, .9, z), (2.6, 1.9, 2.6), col=color.rgb(.2, .55, .22))
-                for _ in range(4):
-                    glow.add('sphere_lo', (x + rng.uniform(-1, 1), 1.7, z + rng.uniform(-1, 1)), .32,
-                             col=rng.choice((color.rgb(1, .45, .6), color.rgb(1, .9, .3), color.white)))
-            elif k == 'electrik':
-                b.add('cyl8', (x, 1.9, z), (.6, 3.8, .6), col=color.rgb(.4, .42, .45))
-                for j in range(3):
-                    b.add('ring_thin', (x, 1.4 + j * .8, z), (1.3 - j * .2, .18, 1.3 - j * .2), col=color.rgb(.75, .62, .2))
-                glow.add('sphere', (x, 4.1, z), 1.0, col=color.rgb(1, .95, .45))
-            elif k == 'eau':
-                b.add('cyl24', (x, .25, z), (3.6, .5, 3.6), col=color.rgb(.72, .75, .8))
-                self.water.add('cyl24', (x, .5, z), (3.0, .05, 3.0), col=WATER)
-                glow.add('cyl8', (x, 1.1, z), (.35, 1.4, .35), col=color.rgb(.75, .92, 1))
-                glow.add('sphere_lo', (x, 1.9, z), (.9, .5, .9), col=color.rgb(.75, .92, 1))
-            elif k == 'feu':
-                b.add('cyl8', (x, .55, z), (1.5, 1.1, 1.5), col=color.rgb(.3, .25, .25))
-                b.add('ring_thin', (x, 1.1, z), (1.6, .2, 1.6), col=color.rgb(.2, .17, .17))
-                glow.add('cone', (x, 1.9, z), (1.2, 1.7, 1.2), col=color.rgb(1, .5, .1))
-                glow.add('cone', (x, 1.7, z), (.7, 1.3, .7), col=color.rgb(1, .85, .2))
-            self.block(x, z, 1.4)
 
     # ================================================================ bases
     def _build_bases(self):
@@ -945,7 +1102,7 @@ class Stadium:
                 b.add('sphere_lo', (x + ox, 1.3 * s, z + oz), .22, col=fc)
         return 1.2 * s
 
-    def _outcrop(self, b, x0, z0):
+    def _outcrop(self, b, x0, z0, block=True):
         """Massif rocheux, parfois avec des ruines de pierre."""
         rng = self.rng
         for _ in range(rng.randint(4, 7)):
@@ -969,50 +1126,119 @@ class Stadium:
                 b.add('cyl', (x0 + sx + 3, hh / 2, z0 + sz), (.8, hh, .8), col=stone, grad=.3)
             b.add('box', (x0 + 3, 3.5, z0), (4.6, .6, .9), rot=(0, ang + 90, 0), col=shade(stone, .95))
             b.add('cyl', (x0 + 1, .35, z0 + 2.5), (.8, 1.6, .8), rot=(90, rng.uniform(0, 180), 0), col=shade(stone, .92))
-        self.block(x0, z0, 3.6)
-        self.block(x0 + 3, z0, 1.6)
+        if block:
+            self.block(x0, z0, 3.6)
+            self.block(x0 + 3, z0, 1.6)
+
+    def _wall_points(self, spacing):
+        """Points au bord des massifs, espacés d'environ `spacing`, avec la normale (nx, nz)
+        qui s'enfonce dans le massif."""
+        sdf, rng = self.wall_sdf, self.rng
+        ii, jj = np.nonzero((sdf > 0) & (sdf < J_RES * 1.5))
+        order = list(range(len(ii)))
+        rng.shuffle(order)
+        taken, out = {}, []
+        for k in order:
+            i, j = ii[k], jj[k]
+            x, z = self.j_min + i * J_RES, self.j_min + j * J_RES
+            if math.hypot(x, z) > F - 2.5:
+                continue
+            cx, cz = int(x // spacing), int(z // spacing)
+            if any(math.hypot(x - px, z - pz) < spacing
+                   for a in (cx - 1, cx, cx + 1) for b in (cz - 1, cz, cz + 1) for px, pz in taken.get((a, b), ())):
+                continue
+            taken.setdefault((cx, cz), []).append((x, z))
+            gx, gz = self.wall_gx[i, j], self.wall_gz[i, j]
+            g = math.hypot(gx, gz) or 1
+            out.append((x, z, gx / g, gz / g))
+        return out
+
+    def _cliff(self, b, x, z, nx, nz):
+        """Morceau de falaise : gros rochers serrés, coiffés de mousse, plus hauts vers l'intérieur."""
+        rng = self.rng
+        yaw = math.degrees(math.atan2(nx, nz))
+        h = rng.uniform(2.8, 3.9)
+        c = shade(CLIFF, rng.uniform(.82, 1.12))
+        px, pz = x + nx * .7, z + nz * .7
+        b.add('blob', (px, h * .42, pz), (rng.uniform(3.0, 3.8), h, 2.6),
+              rot=(rng.uniform(-6, 6), yaw + rng.uniform(-18, 18), rng.uniform(-6, 6)), col=c, wobble=.2, grad=.5)
+        if rng.random() < .75:
+            b.add('blob', (px + nx * .35, h * .88, pz + nz * .35), (2.7, .55, 2.1), rot=(0, yaw, 0),
+                  col=shade(MOSS, rng.uniform(.9, 1.1)), wobble=.22, grad=.25)
+        if rng.random() < .55:          # deuxième rangée, plus haute
+            h2 = h * rng.uniform(1.1, 1.4)
+            b.add('blob', (x + nx * 2.6, h2 * .45, z + nz * 2.6), (3.4, h2, 3.0),
+                  rot=(0, yaw + rng.uniform(-30, 30), 0), col=shade(c, .9), wobble=.22, grad=.5)
+        if rng.random() < .35:          # éboulis au pied
+            self._rock(b, x - nx * .5 + nz * rng.uniform(-1, 1), z - nz * .5 - nx * rng.uniform(-1, 1),
+                       rng.uniform(.3, .55), moss=.3)
+
+    def _grove(self, b, x, z, nx, nz, k):
+        """Rideau d'arbres : troncs serrés derrière une haie épaisse et des racines."""
+        rng = self.rng
+        yaw = math.degrees(math.atan2(nx, nz))
+        g = rng.choice(TREE_GREENS)
+        b.add('blob', (x + nx * .6, .95, z + nz * .6), (3.0, 2.1, 2.2), rot=(0, yaw + rng.uniform(-20, 20), 0),
+              col=shade(g, .8), wobble=.22, grad=.5)
+        if rng.random() < .5:
+            b.add('blob', (x + nx * .1, .3, z + nz * .1), (1.6, .6, 1.0), rot=(0, yaw, 0),
+                  col=color.rgb(.36, .25, .15), wobble=.25, grad=.3)
+        if k % 2 == 0:
+            self._tree(b, x + nx * 1.9, z + nz * 1.9, rng.uniform(1.0, 1.35), rng.choice(('broadleaf', 'conifer')))
 
     def _build_jungle(self):
         rng = self.rng
         b = self.b
-        # massifs rocheux
-        rocks = []
-        for _ in range(600):
-            if len(rocks) >= 22:
-                break
-            a, r = rng.uniform(0, 360), math.sqrt(rng.random()) * (F - 10)
-            x, z = polar(a, r)
-            if self._open_space(x, z, 3) and all(math.hypot(x - rx, z - rz) > 20 for rx, rz in rocks):
-                self._outcrop(b, x, z)
-                rocks.append((x, z))
-        # arbres
+        # bords des massifs : falaises ou rideaux d'arbres selon la région
+        for k, (x, z, nx, nz) in enumerate(self._wall_points(1.9)):
+            style = math.sin(x * .045 + math.sin(z * .03) * 2) * math.cos(z * .05 + math.sin(x * .035) * 1.5)
+            if style > -.2:
+                self._cliff(b, x, z, nx, nz)
+            else:
+                self._grove(b, x, z, nx, nz, k)
+            if rng.random() < .05:       # champignons au pied du mur
+                ox, oz = x - nx * .9, z - nz * .9
+                b.add('cyl6', (ox, .2, oz), (.18, .4, .18), col=color.rgb(.95, .92, .85))
+                b.add('dome', (ox, .35, oz), (.6, .4, .6), col=color.rgb(.9, .2, .15))
+        # cœur des massifs : forêt dense (inaccessible, simple décor)
         S = C.QUALITY['tree_spacing']
         n = int(F / S)
-        kinds = ['broadleaf'] * 50 + ['conifer'] * 18 + ['tropical'] * 14 + ['bush'] * 18
+        kinds = ['broadleaf'] * 55 + ['conifer'] * 25 + ['tropical'] * 20
         for i in range(-n, n + 1):
             for j in range(-n, n + 1):
                 x = i * S + rng.uniform(-S * .38, S * .38)
                 z = j * S + rng.uniform(-S * .38, S * .38)
-                if math.hypot(x, z) > F - 3 or not self._open_space(x, z) or self.blocked(x, z, 1.2):
+                if math.hypot(x, z) > F - 3 or self.wall_dist(x, z) < 2.6:
                     continue
-                s = rng.uniform(.85, 1.35)
-                r = self._tree(b, x, z, s, rng.choice(kinds))
-                self.block(x, z, r)
-                if rng.random() < .5:      # sous-bois
-                    for _ in range(rng.randint(2, 4)):
-                        ox, oz = polar(rng.uniform(0, 360), rng.uniform(1.2, 2.2))
-                        ang = rng.uniform(0, 360)
-                        b.add('box', (x + ox, .3, z + oz), (.4, .04, 1.2), rot=(-35, ang, 0), col=color.rgb(.2, .5, .2))
-                if rng.random() < .06:
-                    ox, oz = polar(rng.uniform(0, 360), 1.8)
-                    b.add('cyl6', (x + ox, .2, z + oz), (.18, .4, .18), col=color.rgb(.95, .92, .85))
-                    b.add('dome', (x + ox, .35, z + oz), (.6, .4, .6), col=color.rgb(.9, .2, .15))
+                if rng.random() < .04:
+                    self._outcrop(b, x, z, block=False)
+                else:
+                    self._tree(b, x, z, rng.uniform(1.0, 1.45), rng.choice(kinds))
+        self._build_bushes()
+
+    def _build_bushes(self):
+        """Hautes herbes : touffes de longues feuilles, bien plus hautes que l'herbe des pelouses."""
+        b, rng = self.b, self.rng
+        ii, jj = np.nonzero(self.bush_grid)
+        for i, j in zip(ii, jj):
+            if (i + j) % 2:
+                continue
+            x, z = self.j_min + i * J_RES, self.j_min + j * J_RES
+            g = rng.choice(BUSH_GREENS)
+            for _ in range(2):
+                h = rng.uniform(1.3, 1.9)
+                b.add('cone6', (x + rng.uniform(-.4, .4), h / 2, z + rng.uniform(-.4, .4)), (.5, h, .5),
+                      rot=(rng.uniform(-18, 18), rng.uniform(0, 60), rng.uniform(-18, 18)), col=shade(g, rng.uniform(.9, 1.15)))
+            if i % 4 == 0 and j % 4 == 0:
+                b.add('blob', (x, .35, z), (1.9, .9, 1.9), col=shade(g, .75), wobble=.25, grad=.4)
 
         # herbes et fleurs sur les pelouses
         for _ in range(C.QUALITY['grass']):
             a, r = rng.uniform(0, 360), math.sqrt(rng.random()) * (F - 4)
             x, z = polar(a, r)
             if not self._clear_of_lanes(x, z, .6) or self.blocked(x, z, .3) or self._inside_open_disc(x, z):
+                continue
+            if self.bush_at(x, z):
                 continue
             if any(polyline_dist(x, z, rp) < rw / 2 + .3 for rp, rw in RIVERS):
                 continue
@@ -1036,6 +1262,7 @@ class Stadium:
         cz = (jj - n + .5) * NAV_CELL
         walk = np.hypot(cx, cz) < F - 2
         margin = .75
+        walk &= self._jsample_np(self.wall_sdf, cx, cz) < -margin      # murs de la jungle
         for ox, oz, orad in self.obstacles:
             r = orad + margin
             i0, i1 = int((ox - r) / NAV_CELL + n), int((ox + r) / NAV_CELL + n) + 1

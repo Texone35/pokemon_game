@@ -3,8 +3,11 @@
 Comment ça marche
 -----------------
 - L'hôte ouvre un port (NET['port'], TCP + UDP) et affiche un code d'invitation qui
-  contient son adresse. L'UPnP demande à la box d'ouvrir ce port toute seule.
-- L'invité colle ce code dans le salon et se connecte en TCP.
+  contient son adresse et une clé secrète tirée au hasard. L'UPnP demande à la box
+  d'ouvrir ce port toute seule.
+- L'invité colle ce code dans le salon et se connecte en TCP. Il doit présenter la clé
+  (message 'join') : quelqu'un qui trouve le port ouvert sans avoir le code est refusé,
+  et une connexion qui ne se présente pas dans les JOIN_TIMEOUT secondes est coupée.
 - TCP (fiable, dans l'ordre) : salon, événements de jeu (tirs, dégâts, messages...).
 - UDP (rapide) : état du monde (hôte -> invité) et position de l'invité (invité -> hôte).
   Un paquet perdu est simplement remplacé par le suivant. Si l'UDP ne passe pas
@@ -29,12 +32,13 @@ import urllib.parse
 import urllib.request
 from xml.etree import ElementTree
 
-import config as C
-
+from game import config as C
 PROTOCOL = 1
 UDP_MAGIC = b'PK'
 MAX_FRAME = 1 << 20
 CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'     # 32 signes, sans 0/O ni 1/I
+KEY_BITS = 20                  # clé secrète du code d'invitation (4 signes)
+JOIN_TIMEOUT = 10.0            # secondes laissées à un invité pour se présenter avec la clé
 
 
 # ==================================================================== outils
@@ -43,11 +47,11 @@ def game_version():
     la carte ou les règles diffèrent) ; seuls les réglages graphiques de config.py
     (QUALITY, taille de fenêtre, compteur d'images) peuvent différer."""
     h = hashlib.sha1()
-    folder = os.path.dirname(os.path.abspath(__file__))
-    for name in sorted(os.listdir(folder)):
-        if not name.endswith('.py'):
-            continue
-        with open(os.path.join(folder, name), encoding='utf-8') as f:
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))      # dossier game/
+    files = sorted(os.path.relpath(os.path.join(d, n), root).replace(os.sep, '/')
+                   for d, _, names in os.walk(root) for n in names if n.endswith('.py'))
+    for name in files:
+        with open(os.path.join(root, name), encoding='utf-8') as f:
             src = f.read().replace('\r\n', '\n')
         if name == 'config.py':
             src = re.sub(r'(?ms)^QUALITY = \{.*?^\}', '', src)
@@ -77,37 +81,55 @@ def is_public(ip):
     return a.is_global and a not in ipaddress.ip_network('100.64.0.0/10')
 
 
-def make_code(ip, port):
-    """Code d'invitation (10 signes) contenant une adresse IPv4 et un port."""
-    n = int.from_bytes(socket.inet_aton(ip) + struct.pack('>H', port), 'big')
+def _encode(n, size):
     chars = []
-    for _ in range(10):
+    for _ in range(size):
         chars.append(CODE_ALPHABET[n & 31])
         n >>= 5
-    s = ''.join(reversed(chars))
-    return f'{s[:5]}-{s[5:]}'
+    return ''.join(reversed(chars))
+
+
+def _decode(s):
+    n = 0
+    for ch in s:
+        n = n * 32 + CODE_ALPHABET.index(ch)
+    return n
+
+
+def make_code(ip, port, key):
+    """Code d'invitation (14 signes) : adresse IPv4, port et clé secrète de la partie."""
+    n = (int.from_bytes(socket.inet_aton(ip) + struct.pack('>H', port), 'big') << KEY_BITS) | key
+    s = _encode(n, 14)
+    return f'{s[:5]}-{s[5:10]}-{s[10:]}'
 
 
 def parse_code(text):
-    """Code d'invitation ou adresse directe ('1.2.3.4', 'nom.exemple.fr:12345') -> (hôte, port)."""
+    """Code d'invitation, ou adresse directe suivie de la clé ('1.2.3.4:47650/ABCD')
+    -> (hôte, port, clé)."""
     t = text.strip()
     if not t:
         raise ValueError('Collez le code donné par votre ami.')
     if '.' in t or ':' in t:
-        host, _, port = t.rpartition(':') if ':' in t else (t, '', '')
+        addr, _, key = t.partition('/')
+        key = key.strip().upper()
+        if len(key) != 4 or any(ch not in CODE_ALPHABET for ch in key):
+            raise ValueError("Il manque la clé de la partie (adresse/XXXX) : utilisez plutôt le code.")
+        host, _, port = addr.rpartition(':') if ':' in addr else (addr, '', '')
         host = host.strip('[] ')
         try:
-            return host, int(port) if port else C.NET['port']
+            port = int(port) if port else C.NET['port']
         except ValueError:
             raise ValueError('Adresse invalide.') from None
+        if not host or not 0 < port < 65536:
+            raise ValueError('Adresse invalide.')
+        return host, port, _decode(key)
     s = re.sub(r'[^0-9A-Za-z]', '', t).upper()
-    if len(s) != 10 or any(ch not in CODE_ALPHABET for ch in s):
-        raise ValueError('Code invalide (format attendu : XXXXX-XXXXX).')
-    n = 0
-    for ch in s:
-        n = n * 32 + CODE_ALPHABET.index(ch)
-    b = n.to_bytes(7, 'big')[-6:]
-    return socket.inet_ntoa(b[:4]), struct.unpack('>H', b[4:])[0]
+    if len(s) != 14 or any(ch not in CODE_ALPHABET for ch in s):
+        raise ValueError('Code invalide (format attendu : XXXXX-XXXXX-XXXX).')
+    n = _decode(s)
+    key = n & ((1 << KEY_BITS) - 1)
+    b = (n >> KEY_BITS).to_bytes(6, 'big')
+    return socket.inet_ntoa(b[:4]), struct.unpack('>H', b[4:])[0], key
 
 
 def _udp_socket():
@@ -157,8 +179,10 @@ class UPnP:
                 except (socket.timeout, ConnectionResetError):
                     continue
                 m = re.search(rb'(?im)^location:\s*(\S+)', data)
-                if m and m.group(1).decode() not in locations:
-                    locations.append(m.group(1).decode())
+                loc = m.group(1).decode('latin-1') if m else ''
+                # seulement une adresse web de la box (jamais file:// ou autre)
+                if loc.lower().startswith(('http://', 'https://')) and loc not in locations:
+                    locations.append(loc)
         finally:
             s.close()
         return any(self._read_description(loc) for loc in locations)
@@ -180,8 +204,11 @@ class UPnP:
                 continue
             stype = child(node, 'serviceType')
             if 'WANIPConnection' in stype or 'WANPPPConnection' in stype:
+                control = urllib.parse.urljoin(base, child(node, 'controlURL'))
+                if not control.lower().startswith(('http://', 'https://')):
+                    continue
                 self.service = stype
-                self.control = urllib.parse.urljoin(base, child(node, 'controlURL'))
+                self.control = control
                 return True
         return False
 
@@ -320,7 +347,7 @@ class Link:
                     if self.token:
                         _thread(self._probe_udp)
                 self.inbox.put(('msg', msg))
-        except (OSError, ConnectionError, ValueError, struct.error):
+        except (OSError, ConnectionError, ValueError, TypeError, struct.error):
             self._lost()
 
     def _lost(self):
@@ -401,6 +428,7 @@ class Host:
     def __init__(self, port=None):
         port = port or C.NET['port']
         self.token = secrets.token_bytes(4)
+        self.key = secrets.randbelow(1 << KEY_BITS)   # clé secrète, contenue dans le code d'invitation
         self.closed = False
         self.link = None
         self.upnp = None
@@ -424,12 +452,12 @@ class Host:
 
     @property
     def lan_code(self):
-        return make_code(self.info['lan'], self.port)
+        return make_code(self.info['lan'], self.port, self.key)
 
     @property
     def public_code(self):
         ip = self.info['public']
-        return make_code(ip, self.port) if ip else None
+        return make_code(ip, self.port, self.key) if ip else None
 
     def _open_internet(self):
         """Ouvre le port sur la box (UPnP) et trouve l'adresse publique."""
@@ -488,6 +516,8 @@ class Host:
                     pass
                 continue
             link = Link(conn, self.udp, 'host', token=self.token)
+            link.since = time.time()             # doit se présenter avec la clé avant JOIN_TIMEOUT
+            link.joined = False
             link.send({'t': 'hello', 'proto': PROTOCOL, 'version': game_version(), 'token': self.token.hex()})
             self.link = link
 
@@ -503,6 +533,9 @@ class Host:
             if link is None or link.closed or len(data) < 7 or data[:2] != UDP_MAGIC or data[3:7] != self.token:
                 continue
             link.host_udp(data[2:3], data[7:], addr)
+
+    def check_key(self, key):
+        return isinstance(key, int) and key == self.key
 
     def drop_link(self):
         if self.link is not None:
@@ -531,7 +564,7 @@ class Guest:
     def __init__(self, code):
         self.state, self.error, self.link = 'connecting', None, None
         try:
-            self.host, self.port = parse_code(code)
+            self.host, self.port, self.key = parse_code(code)
         except ValueError as e:
             self.state, self.error = 'error', str(e)
             return

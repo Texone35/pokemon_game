@@ -1,4 +1,4 @@
-"""Éléments d'interface : panneaux de PV, bannières, badges."""
+"""Éléments d'interface réutilisables : panneaux de PV, bannière, cases d'attaque, fil d'événements."""
 from ursina import Entity, Text, camera, color, curve, destroy, lerp, time
 
 PANEL_BG = color.rgba(.97, .97, .92, .92)

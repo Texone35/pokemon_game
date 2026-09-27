@@ -9,7 +9,7 @@ import math
 from panda3d.core import CullFaceAttrib
 from ursina import Entity, Vec3, Vec4, color
 
-from geometry import MeshBuilder, flat_circle
+from game.world.geometry import MeshBuilder, flat_circle
 
 OUTLINE = .022        # épaisseur du contour sombre (0 pour le désactiver)
 
@@ -522,3 +522,76 @@ class Creature(Entity):
             return
         diff = (target - self.rotation_y + 180) % 360 - 180
         self.rotation_y += diff * min(1, dt * speed)
+
+
+class Portraits:
+    """Portraits des Pokémon (vus de trois quarts face) rendus une fois hors écran dans une
+    seule texture, côte à côte : pour les icônes de la mini-carte."""
+    SIZE = 128
+
+    def __init__(self, species):
+        from panda3d.core import NodePath, OrthographicLens, Texture as PandaTexture
+        from ursina import Texture, application
+        from game.world.geometry import ENV
+        base = application.base
+        self.species = list(dict.fromkeys(species))
+        n = len(self.species)
+        tex = PandaTexture('portraits')
+        self.buffer = base.win.make_texture_buffer('portraits', self.SIZE * n, self.SIZE, tex)
+        self.buffer.set_clear_color((0, 0, 0, 0))
+        self.buffer.set_clear_color_active(True)
+        self.scene = NodePath('portraits')
+        for k, v in ENV.items():
+            self.scene.set_shader_input(k, v)
+        self.scene.set_shader_input('fog_color', Vec4(0, 0, 0, 0))
+        self.scene.set_shader_input('sky_color', Vec4(1.05, 1.05, 1.1, 1))     # pas de soleil ici : ambiance claire
+        self.scene.set_shader_input('ground_color', Vec4(.7, .68, .66, 1))
+        lens = OrthographicLens()
+        lens.set_film_size(2.0 * n, 2.0)
+        cam = base.make_camera(self.buffer, lens=lens, scene=self.scene)
+        cam.reparent_to(self.scene)
+        # la caméra est devant les Pokémon (qui regardent vers +z) : la case k est à x = -2k
+        cam.set_pos(1 - n, 1.4, 9)
+        cam.look_at(1 - n, 1.0, 0)
+        self.scene.set_shader_input('cam_pos', cam.get_pos())
+        self.cam = cam
+        self.models = []
+        for k, sp in enumerate(self.species):
+            c = Creature(sp)
+            c.reparent_to(self.scene)
+            c.shadow.detach_node()
+            lo, hi = c.get_tight_bounds(self.scene)
+            c.set_scale(1.9 / max(hi.x - lo.x, hi.y - lo.y, .01))
+            c.set_h(-25)                      # trois quarts face
+            lo, hi = c.get_tight_bounds(self.scene)
+            c.set_pos(c.get_x() - k * 2 - (lo.x + hi.x) / 2, c.get_y() + 1.0 - (lo.y + hi.y) / 2, 0)
+            self.models.append(c)
+        self.texture = Texture(tex)
+        self._frames = 4                      # quelques images de rendu, puis on fige la texture
+
+    def tick(self):
+        """A appeler à chaque image tant que les modèles existent."""
+        if not self.models:
+            return
+        self._frames -= 1
+        if self._frames > 0:
+            return
+        from ursina import destroy
+        self.buffer.set_active(False)
+        for c in self.models:
+            destroy(c)
+        self.models = []
+
+    def dispose(self):
+        from ursina import application
+        self._frames = 0
+        self.tick()
+        application.base.graphicsEngine.remove_window(self.buffer)
+
+    def icon(self, parent, species, **kwargs):
+        """Quad affichant le portrait de `species`."""
+        n, k = len(self.species), self.species.index(species)
+        e = Entity(parent=parent, model='quad', texture=self.texture, texture_scale=(1 / n, 1),
+                   texture_offset=(k / n, 0), **kwargs)
+        e.set_transparency(True)
+        return e

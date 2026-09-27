@@ -15,11 +15,11 @@ import random
 
 from ursina import Entity, Text, Vec3, Vec4, color, held_keys
 
-import config as C
-from combat import Projectile, Wave, Zone, cast_special, flat
-from creatures import Creature
-from fx import burst
-from geometry import flat_circle
+from game import config as C
+from game.pokemon.combat import Projectile, Wave, Zone, cast_special, flat
+from game.pokemon.creatures import Creature
+from game.world.fx import burst
+from game.world.geometry import flat_circle
 
 STATUS_COLOR = {'burn': color.rgb(1, .5, .15), 'slow': color.rgb(.55, .9, 1), 'stun': color.rgb(1, .95, .3)}
 LOCAL_BAR = color.rgb(.3, .95, .35)          # barre de vie de son propre Pokémon
@@ -46,6 +46,8 @@ class Unit:
         self.hp_factor = 1.0
         self.level, self.xp = 1, 0.0
         self.moving = False
+        self.bush = 0                     # numéro de la touffe de hautes herbes où il se trouve
+        self.veiled = False               # caché (dans l'herbe) aux yeux de l'équipe de ce PC
         self.home = Vec3(pos[0], 0, pos[1])
         self.creature = Creature(species, parent=match.root, position=self.home, scale=self.data['scale'])
         if team:
@@ -61,6 +63,7 @@ class Unit:
         self.bar_fill = Entity(parent=self.bar, model='quad', color=bar_col, origin=(-.5, 0),
                                position=(-w / 2, 0, -.01), scale=(w, .16))
         self.bar_w = w
+        self.ring = getattr(self, 'ring', None)
         if self.is_player and not local:          # nom au-dessus du Pokémon de l'autre joueur
             Text(parent=self.bar, text=f'J{human + 1}', y=.42, z=-.02, origin=(0, 0), scale=12, color=ALLY_BAR)
         self.reset()
@@ -260,6 +263,8 @@ class Unit:
             d = forward or self.facing()
         self.face(d)
         if a['kind'] == 'melee':
+            if target is None:        # coup donné à l'aveugle (dans les hautes herbes...) : il touche quand même
+                target = self.match.blind_target(self, a['range'], d)
             if target is not None:
                 # le coup part après un court élan : la cible peut encore s'écarter
                 self.match.pending_hits.append([C.MELEE_WINDUP, self, target, a['damage']])
@@ -345,9 +350,23 @@ class Unit:
                 moving = self.brain.update(dt)
         self._finish_frame(dt, moving)
 
+    def set_veiled(self, veiled):
+        """Cache (ou montre) le Pokémon, sa barre de vie et son cercle d'équipe."""
+        if veiled == self.veiled:
+            return
+        self.veiled = veiled
+        for e in (self.creature.pivot, self.creature.shadow, self.bar, self.ring):
+            if e is not None:
+                e.visible = not veiled
+
+    def revealed(self):
+        """Vrai s'il vient d'attaquer ou d'être touché : l'herbe ne le cache plus."""
+        r = C.BUSH['reveal']
+        return self.attack_anim > -r or self.match.time - self.last_hit_t < r
+
     def _status_fx(self, dt):
         self._fx_t -= dt
-        if self._fx_t <= 0:
+        if self._fx_t <= 0 and not self.veiled:
             self._fx_t = .15
             for k, v in self.status.items():
                 if v > 0:
@@ -535,6 +554,8 @@ class PlayerBrain:
 
     def _rush_contact(self):
         t = self.target
+        if t is None:                 # ruée sans cible visible : on percute qui se trouve là (même caché)
+            t = self.m.blind_target(self.u, self.u.radius + .5, None)
         if t is not None and t.alive and (flat(t.position - self.u.position)).length() < self.u.radius + t.radius + .5:
             if self.m.authority:
                 self.m.deal_damage(self.u, t, self.rush_move['damage'])
@@ -676,7 +697,7 @@ class BotBrain:
         # adversaires proches
         best, score = None, 1e9
         for e in m.units:
-            if e.alive and e.team and e.team != u.team:
+            if e.alive and e.team and e.team != u.team and e not in m.hidden[u.team]:
                 d = (flat(e.position - u.position)).length()
                 if d < self.AGGRO:
                     s = d + 12 * e.hp / e.max_hp
@@ -711,7 +732,8 @@ class BotBrain:
             self.think_t = .35 + random.random() * .25
             self.think()
         t = self.target
-        if t is not None and (not t.alive or (t.team is None and self.mode == 'retreat')):
+        if t is not None and (not t.alive or (t.team is None and self.mode == 'retreat')
+                              or t in m.hidden[u.team]):       # perdu de vue dans les hautes herbes
             self.target = t = None
         if t is not None:
             to_t = flat(t.position - u.position)

@@ -16,16 +16,17 @@ announce() / say() / emit(), qui les envoient aussi à l'autre PC.
 import math
 import random
 
-from ursina import Entity, Text, Vec3, Vec4, camera, color, destroy, lerp, mouse, time
+from ursina import Entity, Text, Texture, Vec3, Vec4, camera, color, destroy, lerp, mouse, time
 
-import config as C
-from combat import flat, rc
-from emblems import add_emblem
-from fx import ArenaWeather
-from geometry import MeshBuilder
-from stadium import LANES, RIVERS, Stadium
-from ui import Feed, MoveSlot, floating_text, hp_color
-from units import ALLY_BAR, BotBrain, NeutralBrain, PlayerBrain, RemotePlayerBrain, Unit
+from game import config as C
+from game.pokemon.combat import flat, rc
+from game.pokemon.creatures import Portraits
+from game.world.emblems import add_emblem
+from game.world.fx import ArenaWeather
+from game.world.geometry import MeshBuilder
+from game.world.stadium import LANES, RIVERS, Stadium
+from game.interface.widgets import Feed, MoveSlot, floating_text, hp_color
+from game.pokemon.units import ALLY_BAR, BotBrain, NeutralBrain, PlayerBrain, RemotePlayerBrain, Unit
 
 TEAM_KEYS = ('rouge', 'bleu')
 NEUTRAL_RING = color.rgb(.85, .85, .85)
@@ -47,7 +48,7 @@ class Match(Entity):
         self.net = None
         self.root = Entity(parent=self)
         self.stadium = Stadium(self.root)
-        import fx
+        from game.world import fx
         fx.PARTICLES = self.particles = fx.Particles(self.root)
         self.projectiles, self.hazards = [], []
         self.pending_hits = []          # coups au contact en cours d'élan
@@ -56,6 +57,7 @@ class Match(Entity):
         self.state = 'play'
         self.shake_amount = 0.0
         self._bonus = {'rouge': {}, 'bleu': {}, None: {}}
+        self.hidden = {'rouge': set(), 'bleu': set(), None: set()}   # Pokémon cachés dans l'herbe, par équipe qui regarde
 
         self._build_arenas()
         self.units = []
@@ -82,12 +84,13 @@ class Match(Entity):
         self._build_camps()
         self._build_bosses()
         if self.role == 'host':
-            from netsync import HostSync
+            from game.network.netsync import HostSync
             self.net = HostSync(self, setup['host'])
         elif self.role == 'client':
-            from netsync import ClientSync
+            from game.network.netsync import ClientSync
             self.net = ClientSync(self, setup['link'])
         self._quit_t = 0.0
+        self._last_bush = 0
 
         self._warmup = 4
         for u in self.units:          # pas d'ombre figée des Pokémon dans la carte d'ombres
@@ -252,7 +255,7 @@ class Match(Entity):
             self.emit('feed', message, rc(col))
 
     def fx_burst(self, pos, col, n=8, speed=4.0, size=.25):
-        import fx
+        from game.world import fx
         fx.burst(None, pos, col, n=n, speed=speed, size=size)
         self.emit('burst', round(pos.x, 2), round(pos.y, 2), round(pos.z, 2), rc(col), n, speed, size)
 
@@ -310,6 +313,7 @@ class Match(Entity):
 
     def show_hit(self, tgt, dmg, code, src):
         """Invité : dégâts annoncés par l'hôte."""
+        tgt.last_hit_t = self.time
         if tgt.alive:
             tgt.creature.hit_flash(Vec4(1, .3, .25, .7) if tgt.local else Vec4(1, 1, 1, .8), .12)
         self._damage_text(tgt, dmg, code, src)
@@ -403,14 +407,41 @@ class Match(Entity):
     def find_target(self, u, rng):
         """Cible de la visée automatique : l'adversaire le plus proche (les Pokémon d'équipe d'abord)."""
         best, score = None, 1e9
+        hidden = self.hidden[u.team]
         for e in self.units:
-            if e.alive and self.hostile(u, e):
+            if e.alive and self.hostile(u, e) and e not in hidden:
                 d = (flat(e.position - u.position)).length()
                 if d < rng:
                     s = d + (8 if e.team is None else 0)
                     if s < score:
                         best, score = e, s
         return best
+
+    def blind_target(self, u, reach, forward):
+        """Adversaire touché par un coup porté sans cible : le plus proche à portée (devant u si
+        `forward` est donné), qu'il soit visible ou caché dans les hautes herbes."""
+        best, bd = None, 1e9
+        for e in self.units:
+            if e.alive and self.hostile(u, e):
+                to_e = flat(e.position - u.position)
+                d = to_e.length() - e.radius
+                if d < reach and d < bd and (forward is None or d < .5 or to_e.normalized().dot(forward) > .5):
+                    best, bd = e, d
+        return best
+
+    def in_vision(self, team, u):
+        """Vrai si l'équipe `team` voit u : près d'un de ses Pokémon, de sa base ou d'une arène
+        qu'elle contrôle (et pas caché dans les hautes herbes)."""
+        if u.team == team:
+            return True
+        if u in self.hidden[team]:
+            return False
+        p = flat(u.position)
+        if (p - v3(C.TEAMS[team]['base'])).length() < C.BASE_RADIUS + 8:
+            return True
+        if any(a['owner'] == team and (p - a['pos']).length() < C.ARENA_RADIUS + 4 for a in self.arenas):
+            return True
+        return any(o.alive and (flat(o.position) - p).length() < C.VISION for o in self.team_units[team])
 
     # ================================================================ IA : objectifs
     def base_goal(self, team):
@@ -470,7 +501,7 @@ class Match(Entity):
         """Premières images : on calcule la carte d'ombres du décor seul, puis on la fige."""
         self._warmup -= 1
         if self._warmup == 0:
-            from geometry import freeze_shadows
+            from game.world.geometry import freeze_shadows
             freeze_shadows(self.game.sun)
             for u in self.units:
                 if u.alive:
@@ -490,6 +521,7 @@ class Match(Entity):
                 e.ignore = True
 
     def update(self):
+        self.portraits.tick()
         if self._warmup > 0:
             self._warmup_step()
             return
@@ -522,6 +554,7 @@ class Match(Entity):
                 if u.creature.enabled:
                     u.update(dt)
             self._separate_local()
+        self._update_bushes()
         self._update_attacks(dt)
         if self.authority and self.state == 'play':
             self._update_base_zones(dt)
@@ -547,6 +580,26 @@ class Match(Entity):
                     u.creature.visible = False
                 if u.team and u.respawn_t <= 0:
                     self._respawn(u)
+
+    def _update_bushes(self):
+        """Hautes herbes : qui est caché à quelle équipe, et affichage pour l'équipe de ce PC."""
+        st = self.stadium
+        for u in self.units:
+            u.bush = st.bush_at(u.position.x, u.position.z) if u.alive else 0
+        sight = C.BUSH['sight']
+        for team in TEAM_KEYS:
+            watchers = [o for o in self.team_units[team] if o.alive]
+            self.hidden[team] = {u for u in self.units
+                                 if u.bush and u.team not in (None, team) and not u.revealed()
+                                 and not any(o.bush == u.bush or (flat(o.position - u.position)).length() < sight
+                                             for o in watchers)}
+        me = self.player
+        for u in self.units:
+            u.set_veiled(u in self.hidden[me.team])
+        if me.bush and me.bush != self._last_bush:          # on entre dans l'herbe : froissement
+            from game.world import fx
+            fx.burst(None, me.position + Vec3(0, .8, 0), color.rgb(.3, .7, .4), n=6, speed=2.5, size=.2)
+        self._last_bush = me.bush
 
     def _respawn(self, u):
         i = self.team_units[u.team].index(u)
@@ -613,7 +666,7 @@ class Match(Entity):
             u.creature.set_pos(x, self.stadium.walk_y(x, z), z)
 
     def _update_melee(self, dt):
-        import fx
+        from game.world import fx
         keep = []
         for hit in self.pending_hits:
             hit[0] -= dt
@@ -850,11 +903,12 @@ class Match(Entity):
 
     def dispose(self):
         """Quitte la partie : supprime la scène et ferme la connexion."""
-        import fx
+        from game.world import fx
         if self.net is not None:
             self.net.close()
         self._clear_attacks()
         fx.PARTICLES = None
+        self.portraits.dispose()
         destroy(self.ui)
         destroy(self.root)
         destroy(self)
@@ -971,6 +1025,7 @@ class Match(Entity):
         self.map_s = .2 / C.FIELD_RADIUS
         Entity(parent=self.map_root, model='circle', color=color.rgba(.1, .12, .25, .85), scale=.43, z=.03)
         Entity(parent=self.map_root, model='circle', color=color.rgba(.3, .55, .28, .95), scale=.4, z=.02)
+        Entity(parent=self.map_root, model='quad', texture=self._jungle_map_texture(), scale=.4, z=.018)
         for pts, w, col in [(p, w, color.rgba(.9, .88, .8, .9)) for p, w in LANES] + \
                            [(p, w, color.rgba(.3, .65, 1, .9)) for p, w in RIVERS]:
             for (ax, az), (bx, bz) in zip(pts, pts[1:]):
@@ -992,12 +1047,18 @@ class Match(Entity):
                                  color=color.rgb(.85, .95, .7) if c.get('wild') else color.rgb(1, .75, .2),
                                  scale=.007 if c.get('wild') else .012,
                                  position=(c['pos'].x * self.map_s, c['pos'].z * self.map_s, .005)) for c in self.camps]
+        # Pokémon des équipes : leur portrait dans un médaillon aux couleurs de l'équipe
+        self.portraits = Portraits([u.species for u in self.units if u.team])
         self.map_units = {}
         for u in self.units:
             if u.team:
-                col = color.rgb(1, .95, .2) if u.local else ALLY_BAR if u.is_player else C.TEAMS[u.team]['light']
-                self.map_units[u] = Entity(parent=self.map_root, model='circle', color=col,
-                                           scale=.02 if u.is_player else .014, z=-.01 if u.is_player else 0)
+                col = color.rgb(1, .95, .2) if u.local else ALLY_BAR if u.is_player else C.TEAMS[u.team]['color']
+                s = .04 if u.is_player else .034
+                icon = Entity(parent=self.map_root, z=-.02 if u.local else -.01 if u.is_player else 0)
+                Entity(parent=icon, model='circle', color=col, scale=s)
+                Entity(parent=icon, model='circle', color=color.rgb(.08, .09, .14), scale=s * .8, z=-.001)
+                self.portraits.icon(icon, u.species, scale=s * .95, z=-.002)
+                self.map_units[u] = icon
         # --- joueur
         p = Entity(parent=ui, position=(.36, -.33))
         Entity(parent=p, model='quad', color=color.rgba(.05, .05, .08, .8), origin=(-.5, .5), scale=(.5, .13))
@@ -1041,6 +1102,23 @@ class Match(Entity):
         self.feed = Feed(parent=ui, position=(.86, -.06))
         self.arena_text = Text(parent=ui, text='', position=(0, .27), origin=(0, 0), scale=.95)
 
+    def _jungle_map_texture(self):
+        """Image de la mini-carte : massifs de la jungle (vert sombre) et hautes herbes."""
+        import numpy as np
+        from PIL import Image
+        st = self.stadium
+        n = 256
+        xs = (np.arange(n) + .5) / n * 2 * C.FIELD_RADIUS - C.FIELD_RADIUS
+        X, Z = np.meshgrid(xs, xs[::-1])                  # ligne 0 de l'image = nord
+        sdf = st._jsample_np(st.wall_sdf, X, Z)
+        i = np.clip(np.round((X - st.j_min) / .5).astype(int), 0, st.j_n - 1)
+        j = np.clip(np.round((Z - st.j_min) / .5).astype(int), 0, st.j_n - 1)
+        img = np.zeros((n, n, 4), np.uint8)
+        img[sdf > 0] = (22, 52, 24, 245)
+        img[st.bush_grid[i, j] > 0] = (70, 170, 120, 235)
+        img[np.hypot(X, Z) > C.FIELD_RADIUS - 1] = 0
+        return Texture(Image.fromarray(img, 'RGBA'))
+
     @staticmethod
     def _set_text(t, value):
         if t.text != value:          # recréer un texte Ursina est coûteux : seulement s'il change
@@ -1066,8 +1144,9 @@ class Match(Entity):
         self.map_pit.scale = .04 if boss else .03
         for camp, dot in zip(self.camps, self.map_camps):
             dot.enabled = camp['alive']
+        me = self.player.team
         for u, dot in self.map_units.items():
-            dot.enabled = u.alive
+            dot.enabled = u.alive and self.in_vision(me, u)      # adversaires : seulement s'ils sont vus
             if u.alive:
                 dot.position = (u.position.x * self.map_s, u.position.z * self.map_s, dot.z)
         # joueur
@@ -1108,5 +1187,11 @@ class Match(Entity):
             self._set_text(self.arena_text, f"{a['name']} ({C.TYPES[a['type']]['name']}) : {st}   "
                                             f"capture {int(abs(a['control']) * 100)} %")
             self.arena_text.color = C.TYPES[a['type']]['light']
+        elif pl.alive and pl.bush:
+            enemy = 'bleu' if pl.team == 'rouge' else 'rouge'
+            hid = pl in self.hidden[enemy]
+            self._set_text(self.arena_text, "Caché dans les hautes herbes" if hid else
+                           "Hautes herbes : repéré ! (attaque ou adversaire tout près)")
+            self.arena_text.color = color.rgb(.55, 1, .7) if hid else color.rgb(1, .75, .4)
         else:
             self._set_text(self.arena_text, '')

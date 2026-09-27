@@ -50,6 +50,10 @@ BASE_HEAL = 60                 # PV/s rendus dans sa propre base
 BASE_DAMAGE = 80               # dégâts/s infligés aux ennemis qui entrent dans une base
 PIT_RADIUS = 11
 TREE_SPACING = 4.2             # densité de la jungle
+# Hautes herbes : un Pokémon qui s'y trouve est invisible pour l'équipe adverse, sauf si un
+# adversaire est dans la même touffe ou tout près, ou s'il vient d'attaquer ou d'être touché.
+BUSH = {'reveal': 1.2,          # secondes pendant lesquelles on reste visible après une attaque / un coup
+        'sight': 3.0}           # distance à laquelle un adversaire voit quand même dans l'herbe
 
 TEAMS = {
     'rouge': {'name': 'Rouge', 'color': color.rgb(.92, .2, .2), 'light': color.rgb(1, .55, .5),
@@ -308,6 +312,7 @@ NET = {
     'upnp': True,              # ouvrir automatiquement le port sur la box (UPnP)
 }
 TARGET_RANGE = 16              # portée de la visée automatique
+VISION = 20                    # un adversaire n'apparaît sur la mini-carte qu'à cette distance d'un allié
 
 # ---------------------------------------------------------------- progression
 XP_PER_LEVEL = 120             # XP pour passer du niveau n au niveau n+1 : n * XP_PER_LEVEL
