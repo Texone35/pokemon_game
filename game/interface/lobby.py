@@ -29,8 +29,9 @@ from ursina.shaders import unlit_shader
 
 from game import config as C
 from game.network import net
+from game.pokemon import kit
 from game.pokemon.creatures import Creature, Portraits
-from game.world.geometry import MeshBuilder, flat_circle
+from game.world.geometry import MeshBuilder, destroy_tree, flat_circle
 
 GOLD = color.rgb(1, .82, .28)
 GOLD_DARK = color.rgb(.55, .4, .08)
@@ -50,21 +51,12 @@ CAROUSEL = Vec3(4.4, 0, 10.5)         # carrousel de l'accueil
 CAROUSEL_R = 6.6                     # 16 Pokémon sur le plateau
 FRONT = CAROUSEL - Vec3(0, 0, CAROUSEL_R)            # place d'honneur du carrousel (face à la caméra)
 
-MOVE_KIND = {'basic': 'attaque de base', 'rush': 'ruée', 'strike': 'impact de zone', 'homing': 'tête chercheuse',
-             'spin': 'onde de choc', 'beam': 'rayon', 'blink': 'téléportation', 'heal': 'soin'}
-SPECIAL_KIND = {'beam': 'rayon', 'wave': 'onde', 'zone': 'zone', 'nova': 'anneau', 'charge': 'charge', 'heal': 'soin'}
+MOVE_KIND = {'rush': 'ruée', 'charge': 'roulade', 'strike': 'zone', 'shot': 'tir', 'homing': 'tête chercheuse',
+             'spin': 'onde autour de soi', 'wave': 'onde de choc', 'beam': 'rayon', 'nova': 'anneau',
+             'blink': 'téléportation', 'heal': 'soin'}
 
 
-def _font(name):
-    """Police Windows si elle existe (Segoe UI), sinon celle d'Ursina par défaut."""
-    folder = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts'
-    if (folder / name).exists():
-        application.fonts_folder = folder
-        return {'font': name}
-    return {}
-
-
-F_TITLE, F_BOLD, F_SEMI = _font('seguibl.ttf'), _font('segoeuib.ttf'), _font('seguisb.ttf')
+from game.interface.style import F_BOLD, F_SEMI, F_TITLE, key_label  # noqa: E402  (polices communes)
 
 
 def _copy(text):
@@ -191,7 +183,7 @@ class Podium:
             return
         self.species = species
         if self.creature is not None:
-            destroy(self.creature)
+            destroy_tree(self.creature)
             self.creature = None
         if species:
             t = C.TYPES[C.SPECIES[species]['type']]
@@ -267,14 +259,14 @@ class Sparkles:
                 self._reset(e)
 
 
-def _stats(species):
-    """Statistiques normalisées (0-1) parmi les Pokémon jouables, pour les jauges du salon."""
-    def raw(sp):
-        d = C.SPECIES[sp]
-        a = d['attack']
-        return {'PV': d['hp'], 'Vitesse': d['speed'], 'Portée': a['range'], 'Puissance': a['damage'] / a['cooldown']}
+def _stats(species, build='standard'):
+    """Stats au niveau maximum (forme finale), normalisées (0-1) parmi les Pokémon jouables,
+    pour les jauges du salon."""
+    def raw(sp, b='standard'):
+        st = kit.team_stats(sp, C.form_for(sp, C.MAX_LEVEL), C.MAX_LEVEL, b)
+        return {C.STAT_NAMES[k]: st[k] for k in C.STATS}
     vals = [raw(sp) for sp in C.PLAYABLE]
-    me = raw(species)
+    me = raw(species, build)
     out = []
     for k in me:
         lo, hi = min(v[k] for v in vals), max(v[k] for v in vals)
@@ -296,10 +288,9 @@ def _zones(ptype):
     return ', '.join(good), ', '.join(bad)
 
 
-def _move_kind(species, mv):
-    if mv['kind'] == 'special':
-        return SPECIAL_KIND.get(C.SPECIES[species]['special']['kind'], 'capacité spéciale')
-    return MOVE_KIND.get(mv['kind'], '')
+def _move_kind(mv):
+    aim = 'immédiat' if mv['kind'] in C.SELF_CAST else 'visée'
+    return f"{MOVE_KIND.get(mv['kind'], '')}, {aim}  -  Nv {mv['unlock']}"
 
 
 class Lobby(Entity):
@@ -312,6 +303,7 @@ class Lobby(Entity):
         self.link = None                   # connexion avec l'autre joueur
         self.mode = None                   # 'solo', 'host' ou 'guest'
         self.pick = {'me': 'pikachu', 'other': None}
+        self.build = {'me': 'standard', 'other': 'standard'}      # façon de jouer le Pokémon choisi
         self.ready = {'me': False, 'other': False}
         self.ping_ms = None
         self._ping_t = 0.0
@@ -341,7 +333,7 @@ class Lobby(Entity):
     # ================================================================ écrans
     def _clear_ui(self):
         if self.ui is not None:
-            destroy(self.ui)
+            destroy_tree(self.ui)
         self.ui = Entity(parent=camera.ui)
         self.cards = None
         self._info_species = None
@@ -379,7 +371,7 @@ class Lobby(Entity):
         t = C.TYPES[d['type']]
         self.front_name.text = d['name']
         if self.front_type is not None:
-            destroy(self.front_type)
+            destroy_tree(self.front_type)
         self.front_type = chip(self.front_label, t['name'].upper(), (0, -.042), t['color'], size=.75)
         self.front_role.text = C.PLAYABLE_ROLE[sp]
 
@@ -453,7 +445,11 @@ class Lobby(Entity):
         self.me_label = Entity(parent=ui, position=(-.12, -.19))
         self.other_label = Entity(parent=ui, position=(-.56, -.15))
         # invitation (hôte, tant que personne n'a rejoint)
-        self.invite = panel(ui, (-.6, .1), .44, .36)
+        if self.mode != 'guest':
+            self.seed = random.randrange(1 << 30)   # tirage des alliés de l'IA, montré dans le salon
+        self.team_panel = Entity(parent=ui, position=(-.62, .255))
+        self._team_sig = None
+        self.invite = panel(ui, (-.6, -.03), .44, .36)
         Text(parent=self.invite, text='INVITEZ UN AMI', position=(0, .14, -.01), origin=(0, 0), scale=1.15,
              color=GOLD, **F_BOLD)
         Text(parent=self.invite, text='Envoyez-lui ce code :', position=(0, .1, -.01), origin=(0, 0), scale=.8,
@@ -470,7 +466,7 @@ class Lobby(Entity):
                                color=DIM, **F_SEMI)
         self.invite.enabled = self.mode == 'host'
         # fiche du Pokémon choisi
-        self.info_panel = panel(ui, (.53, .08), .6, .6)
+        self.info_panel = panel(ui, (.52, .1), .64, .68)
         self.info = Entity(parent=self.info_panel, z=-.01)
         # cartes de choix
         self.cards = {}
@@ -484,7 +480,7 @@ class Lobby(Entity):
         self.ready_btn = Btn(ui, label, (.66, -.455), self.toggle_ready, w=.3, h=.06, size=1.05,
                              col=color.rgba(.12, .45, .24, .97), accent=OK_GREEN)
         self.status = Text(parent=ui, text='', position=(0, -.455), origin=(0, 0), scale=.85, color=DIM, **F_SEMI)
-        self.ai_btn = Btn(ui, '', (.35, .43), self.toggle_ai, w=.44, h=.062, size=.85, align='left',
+        self.ai_btn = Btn(ui, '', (-.02, .43), self.toggle_ai, w=.44, h=.062, size=.85, align='left',
                           col=color.rgba(.14, .14, .28, .95))
         self._refresh_ai()
         self.ping_text = Text(parent=ui, text='', position=(.83, .44), origin=(.5, 0), scale=.8, color=DIM,
@@ -516,48 +512,70 @@ class Lobby(Entity):
 
     def _build_info(self, sp):
         """Fiche du Pokémon choisi : nom, type, rôle, jauges et attaques."""
-        destroy(self.info)
+        destroy_tree(self.info)
         self.info = info = Entity(parent=self.info_panel, z=-.01)
         d = C.SPECIES[sp]
         t = C.TYPES[d['type']]
-        x0 = -.265
-        Text(parent=info, text=d['name'], position=(x0, .25), origin=(-.5, 0), scale=2.2, **F_BOLD)
-        chip(info, t['name'].upper(), (x0 + .06, .195), t['color'], w=.12, size=.78)
-        Text(parent=info, text=C.PLAYABLE_ROLE[sp], position=(x0, .145), origin=(-.5, 0), scale=.82, color=DIM,
-             **F_SEMI)
+        x0, x1 = -.29, .29                         # bords gauche et droit du contenu
+
+        def sep(y):
+            Entity(parent=info, model='quad', scale=(x1 - x0, .002), position=(0, y), color=color.rgba(1, 1, 1, .12))
+
+        # --- identité
+        Text(parent=info, text=d['name'], position=(x0, .295), origin=(-.5, 0), scale=2.1, **F_BOLD)
+        chip(info, t['name'].upper(), (x0 + .06, .235), t['color'], w=.12, size=.78)
+        build = self.build['me']
+        role = C.ROLES[kit.line_role(sp, build)]['name']
+        curve = C.CURVES[kit.line_curve(sp, build)]['name']
+        chip(info, f'{role.upper()}  -  {curve.upper()}', (x0 + .28, .235), color.rgba(1, 1, 1, .12), w=.3, size=.7)
+        desc = kit.build_cfg(sp, build).get('desc') or C.PLAYABLE_ROLE[sp]
+        Text(parent=info, text=desc, position=(x0, .19), origin=(-.5, 0), scale=.8, color=DIM, **F_SEMI)
         evo = '  >  '.join(f"{C.SPECIES[f]['name']} (Nv {lvl})" for lvl, f in C.EVOLUTIONS.get(sp, ()))
         if evo:
-            Text(parent=info, text='Évolue : ' + evo, position=(x0, .114), origin=(-.5, 0), scale=.72,
+            Text(parent=info, text='Évolue : ' + evo, position=(x0, .158), origin=(-.5, 0), scale=.72,
                  color=t['light'], **F_SEMI)
         if sp in C.TRAITS:
-            name, desc = C.TRAITS[sp]
-            Text(parent=info, text=f'Talent  {name} : {desc}', position=(x0, .084), origin=(-.5, 0), scale=.72,
+            name, tdesc, _ = C.TRAITS[sp]
+            Text(parent=info, text=f'Talent  {name} : {tdesc}', position=(x0, .126), origin=(-.5, 0), scale=.72,
                  color=GOLD, **F_SEMI)
-        good, bad = _zones(d['type'])
-        Text(parent=info, text=f'Terrain  <green>+ {good or "-"}   <red>- {bad or "-"}', position=(x0, .056),
-             origin=(-.5, 0), scale=.72, color=DIM, **F_SEMI)
-        y = .022
-        for name, v in _stats(sp):
-            Text(parent=info, text=name, position=(x0, y), origin=(-.5, 0), scale=.78, **F_SEMI)
-            bw = .38
-            Entity(parent=info, model=_quad(bw, .014, .007), scale=(bw, .014), origin=(-.5, 0), position=(x0 + .14, y),
+        sep(.1)
+        builds = kit.builds_for(sp)
+        name = next(n for k, n, _ in builds if k == build)
+        if len(builds) > 1:                       # plusieurs builds : cliquer pour passer au suivant
+            Btn(info, f'Build : {name}   >', (x0 + .125, .07), self.cycle_build, w=.25, h=.036, size=.72,
+                accent=GOLD, align='left', col=color.rgba(.2, .22, .42, .97))
+        else:
+            Text(parent=info, text=f'Build : {name}', position=(x0, .07), origin=(-.5, 0), scale=.72, color=DIM,
+                 **F_SEMI)
+        tk, form = kit.transform_of(sp)
+        tcfg = C.TRANSFORMS[tk]
+        what = C.SPECIES[form]['name'] if form else tcfg['name']
+        Text(parent=info, text=f"{key_label(C.TRANSFORM_KEY)} : {what} (Nv {tcfg['level']})", position=(x1, .07),
+             origin=(.5, 0), scale=.68, color=color.rgb(1, .7, .9), **F_SEMI)
+        # --- stats (niveau max, forme finale)
+        y = .025
+        bw = .4
+        for name, v in _stats(sp, build):
+            Text(parent=info, text=name, position=(x0, y), origin=(-.5, 0), scale=.72, **F_SEMI)
+            Entity(parent=info, model=_quad(bw, .014, .007), scale=(bw, .014), origin=(-.5, 0), position=(x1 - bw, y),
                    color=color.rgba(1, 1, 1, .1))
-            Entity(parent=info, model=_quad(bw * v, .014, .007), scale=(bw * v, .014), origin=(-.5, 0),
-                   position=(x0 + .14, y, -.001), color=t['light'])
-            y -= .03
-        y -= .012
+            Entity(parent=info, model=_quad(max(.014, bw * v), .014, .007), scale=(max(.014, bw * v), .014),
+                   origin=(-.5, 0), position=(x1 - bw, y, -.001), color=t['light'])
+            y -= .026
+        sep(y + .003)
+        # --- attaques
+        y -= .02
         Text(parent=info, text='ATTAQUES', position=(x0, y), origin=(-.5, 0), scale=.85, color=GOLD, **F_BOLD)
-        y -= .04
-        for mv in C.moves_for(sp, sp):
-            k = mv['key'].upper()
-            Entity(parent=info, model=_quad(.032, .032, .007), scale=(.032, .032), position=(x0 + .016, y),
-                   color=GOLD)
-            Text(parent=info, text=k, position=(x0 + .016, y, -.001), origin=(0, 0), scale=.85,
+        y -= .034
+        for mv in kit.moves_for(sp, sp, None, build):
+            k = key_label(mv['key'])
+            Entity(parent=info, model=_quad(.03, .03, .007), scale=(.03, .03), position=(x0 + .015, y), color=GOLD)
+            Text(parent=info, text=k, position=(x0 + .015, y, -.001), origin=(0, 0), scale=.82,
                  color=color.rgb(.12, .1, .05), **F_BOLD)
-            Text(parent=info, text=mv['name'], position=(x0 + .045, y), origin=(-.5, 0), scale=.85, **F_SEMI)
-            kind = _move_kind(sp, mv) + (f"  -  Nv {mv['unlock']}" if mv.get('locked') else '')
-            Text(parent=info, text=kind, position=(.265, y), origin=(.5, 0), scale=.72, color=DIM, **F_SEMI)
-            y -= .035
+            name = ('Ultime : ' if mv['slot'] == 'ult' else '') + mv['name']
+            Text(parent=info, text=name, position=(x0 + .045, y), origin=(-.5, 0), scale=.78, **F_SEMI)
+            Text(parent=info, text=_move_kind(mv), position=(x1, y), origin=(.5, 0), scale=.64, color=DIM, **F_SEMI)
+            y -= .031
 
     # ================================================================ actions
     def start_solo(self):
@@ -604,15 +622,29 @@ class Lobby(Entity):
     def choose(self, species):
         if self.ready['me'] and self.mode != 'solo':
             return                               # on a déjà validé : repasser « pas prêt » pour changer
+        if species != self.pick['me']:
+            self.build['me'] = 'standard'
         self.pick['me'] = species
         if self.mode == 'guest' and self.link:
-            self.link.send({'t': 'pick', 'sp': species})
+            self.link.send({'t': 'pick', 'sp': species, 'b': self.build['me']})
         self._sync()
+        self._refresh_room()
+
+    def cycle_build(self):
+        """Build suivant pour le Pokémon choisi."""
+        if self.ready['me'] and self.mode != 'solo':
+            return
+        keys = [k for k, _, _ in kit.builds_for(self.pick['me'])]
+        self.build['me'] = keys[(keys.index(self.build['me']) + 1) % len(keys)] if self.build['me'] in keys else keys[0]
+        if self.mode == 'guest' and self.link:
+            self.link.send({'t': 'pick', 'sp': self.pick['me'], 'b': self.build['me']})
+        self._sync()
+        self._info_species = None
         self._refresh_room()
 
     def toggle_ready(self):
         if self.mode == 'solo':
-            self._launch([self.pick['me']], 0, 'solo', random.randrange(1 << 30))
+            self._launch([self.pick['me']], 0, 'solo', self.seed, [self.build['me']])
             return
         self.ready['me'] = not self.ready['me']
         if self.mode == 'guest' and self.link:
@@ -669,25 +701,27 @@ class Lobby(Entity):
     def _sync(self):
         """Hôte : envoie l'état du salon à l'invité."""
         if self.mode == 'host' and self.link is not None and self.link.joined and not self.link.closed:
-            self.link.send({'t': 'lobby', 'host': {'sp': self.pick['me'], 'ready': self.ready['me']},
+            self.link.send({'t': 'lobby', 'host': {'sp': self.pick['me'], 'ready': self.ready['me'],
+                                                   'b': self.build['me']},
                             'guest': {'sp': self.pick['other'], 'ready': self.ready['other']},
-                            'ping': self.ping_ms, 'ai': self.ai})
+                            'ping': self.ping_ms, 'ai': self.ai, 'seed': self.seed})
             if self.ready['me'] and self.ready['other'] and self.pick['other']:
                 self._host_start()
 
     def _host_start(self):
         humans = [self.pick['me'], self.pick['other']]
+        builds = [self.build['me'], self.build['other']]
         world = {'tree_spacing': C.QUALITY['tree_spacing'], 'relief': C.QUALITY['relief']}
-        seed = random.randrange(1 << 30)            # même tirage des Pokémon de l'IA sur les deux PC
-        self.link.send({'t': 'start', 'humans': humans, 'map': world, 'seed': seed})
-        self._launch(humans, 0, 'host', seed)
+        seed = self.seed                            # même tirage des Pokémon de l'IA sur les deux PC (vu au salon)
+        self.link.send({'t': 'start', 'humans': humans, 'builds': builds, 'map': world, 'seed': seed})
+        self._launch(humans, 0, 'host', seed, builds)
 
-    def _launch(self, humans, local, role, seed=0):
+    def _launch(self, humans, local, role, seed=0, builds=None):
         if self._starting:
             return
         self._starting = True
         setup = {'humans': humans, 'local': local, 'role': role, 'host': self.host, 'link': self.link, 'seed': seed,
-                 'ai': self.ai}
+                 'ai': self.ai, 'builds': builds or ['standard'] * len(humans)}
         self.host = self.guest = self.link = None      # la partie prend la main sur la connexion
         self.game.start_match(setup)
 
@@ -737,6 +771,8 @@ class Lobby(Entity):
                 self.game.banner.show('Le joueur 2 a rejoint la partie !', 2.5, text_color=OK_GREEN)
             elif t == 'pick' and msg.get('sp') in C.PLAYABLE:
                 self.pick['other'] = msg['sp']
+                b = msg.get('b')
+                self.build['other'] = b if b in [k for k, _, _ in kit.builds_for(msg['sp'])] else 'standard'
                 self.ready['other'] = False
             elif t == 'ready':
                 self.ready['other'] = bool(msg.get('v')) and self.pick['other'] is not None
@@ -805,9 +841,12 @@ class Lobby(Entity):
             elif t == 'lobby' and self.mode == 'guest':
                 hs, gs = msg.get('host') or {}, msg.get('guest') or {}
                 self.pick['other'] = hs.get('sp') if hs.get('sp') in C.PLAYABLE else None
+                self.build['other'] = hs.get('b') or 'standard'
                 self.ready['other'] = bool(hs.get('ready'))
                 self.ready['me'] = bool(gs.get('ready'))
                 self.ping_ms = msg.get('ping')
+                if isinstance(msg.get('seed'), int):
+                    self.seed = msg['seed']
                 if msg.get('ai') in ('facile', 'expert'):
                     self.ai = msg['ai']
                     self._refresh_ai()
@@ -820,14 +859,17 @@ class Lobby(Entity):
                     if k in ('tree_spacing', 'relief') and isinstance(v, (int, float)):
                         C.QUALITY[k] = float(v)     # même jungle et même relief que l'hôte
                 seed = msg.get('seed', 0)
-                self._launch(humans, 1, 'client', seed if isinstance(seed, int) else 0)
+                builds = msg.get('builds') or ['standard', 'standard']
+                builds = [b if isinstance(b, str) and b in [k for k, _, _ in kit.builds_for(s)] else 'standard'
+                          for s, b in zip(humans, builds)]
+                self._launch(humans, 1, 'client', seed if isinstance(seed, int) else 0, builds)
                 return
 
     # ================================================================ affichage
     def _player_tag(self, parent, who, sp, ready, you):
         """Étiquette sous un socle : « J1 (vous) · Pikachu » et « PRÊT »."""
         for c in list(parent.children):
-            destroy(c)
+            destroy_tree(c)
         name = C.SPECIES[sp]['name'] if sp else '...'
         Text(parent=parent, text=f"{who}{'  (vous)' if you else ''}  ·  {name}", origin=(0, 0), scale=1.0,
              color=OK_GREEN if ready else color.white, **F_BOLD)
@@ -848,7 +890,7 @@ class Lobby(Entity):
             card.bg.highlight_color = card.bg.color.tint(.1)
             card.animate_y(card.base_y + (.014 if sel else 0), duration=.12)
             if card.tag is not None:
-                destroy(card.tag)
+                destroy_tree(card.tag)
                 card.tag = None
             if duo and sp == other:                  # choix de l'autre joueur
                 card.tag = chip(card, self.other_tag, (.052, .066), C.TEAMS['rouge']['light'], w=.04,
@@ -857,9 +899,10 @@ class Lobby(Entity):
             self._info_species = me
             self._build_info(me)
         self._player_tag(self.me_label, self.me_tag, me, self.ready['me'] and duo, True)
+        self._refresh_team()
         if not duo:
             for c in list(self.other_label.children):
-                destroy(c)
+                destroy_tree(c)
             self.previews[1].root.enabled = False
             self.status.text = '← →  ou clic : choisir   ·   Entrée : lancer   ·   Échap : retour'
             return
@@ -879,6 +922,60 @@ class Lobby(Entity):
             self.status.text = "En attente de l'autre joueur..."
         else:
             self.status.text = 'Choisissez votre Pokémon puis appuyez sur PRÊT.'
+
+    def _roster_preview(self):
+        """Équipe rouge telle qu'elle sera en partie : joueurs humains puis alliés de l'IA."""
+        me, other = self.pick['me'], self.pick['other']
+        if self.mode == 'solo' or other is None:
+            humans, builds = [me], [self.build['me']]
+        elif self.mode == 'host':
+            humans, builds = [me, other], [self.build['me'], self.build['other']]
+        else:
+            humans, builds = [other, me], [self.build['other'], self.build['me']]
+        return C.build_roster('rouge', humans, getattr(self, 'seed', 0), builds)
+
+    def _refresh_team(self):
+        """Panneau « VOTRE ÉQUIPE » : les cinq Pokémon, leur rôle, et un conseil de composition."""
+        roster = self._roster_preview()
+        sig = tuple((e['species'], e.get('build')) for e in roster)
+        if sig == self._team_sig:
+            return
+        self._team_sig = sig
+        for c in list(self.team_panel.children):
+            destroy_tree(c)
+        tp = self.team_panel
+        panel(tp, (0, -.1), .4, .24)
+        Text(parent=tp, text='VOTRE ÉQUIPE', position=(-.185, .005, -.01), origin=(-.5, 0), scale=.9, color=GOLD,
+             **F_BOLD)
+        me_idx = 0 if self.mode != 'guest' else 1
+        counts = {}
+        for i, e in enumerate(roster):
+            y = -.03 - i * .031
+            role = kit.line_role(e['species'], e.get('build'))
+            counts[role] = counts.get(role, 0) + 1
+            rc = color.rgb(*C.ROLE_COLORS[role])
+            if e.get('player'):
+                who = 'VOUS' if e.get('human') == me_idx else 'AMI'
+            else:
+                who = 'IA'
+            chip(tp, who, (-.165, y), GOLD if who == 'VOUS' else C.TEAMS['rouge']['light'] if who == 'AMI'
+                 else color.rgba(1, 1, 1, .16), w=.05, size=.6, txt_col=color.rgb(.12, .1, .05) if who != 'IA'
+                 else color.white)
+            name = C.SPECIES[e['species']]['name']
+            if e.get('build', 'standard') != 'standard':
+                name += f" ({dict((k, n) for k, n, _ in kit.builds_for(e['species']))[e['build']]})"
+            Text(parent=tp, text=name, position=(-.13, y, -.01), origin=(-.5, 0), scale=.72, **F_SEMI)
+            chip(tp, C.ROLES[role]['name'].upper(), (.13, y), color.rgba(rc[0], rc[1], rc[2], .85), w=.1, size=.58,
+                 txt_col=color.rgb(.08, .08, .12))
+        missing = [C.ROLES[r]['name'] for r in C.TEAM_NEEDS if not counts.get(r)]
+        crowded = [C.ROLES[r]['name'] for r, n in counts.items() if n > C.TEAM_MAX_SAME]
+        if missing:
+            tip, col = 'Conseil : il manque ' + ' et '.join(m.lower() for m in missing), color.rgb(1, .75, .4)
+        elif crowded:
+            tip, col = f'Conseil : trop de {crowded[0].lower()}s', color.rgb(1, .75, .4)
+        else:
+            tip, col = 'Équipe équilibrée', OK_GREEN
+        Text(parent=tp, text=tip, position=(-.185, -.192, -.01), origin=(-.5, 0), scale=.68, color=col, **F_SEMI)
 
     def _refresh_invite(self):
         h = self.host
@@ -946,6 +1043,6 @@ class Lobby(Entity):
         self._close_net()
         self.portraits.dispose()
         self.game.sky.enabled = True
-        destroy(self.ui)
-        destroy(self.scene)
-        destroy(self)
+        destroy_tree(self.ui)
+        destroy_tree(self.scene)
+        destroy_tree(self)

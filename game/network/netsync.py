@@ -27,8 +27,11 @@ from game.pokemon.combat import Beam, Projectile, Wave, Zone, heal_fx
 HEAD = struct.Struct('<IdB')          # numéro, horloge de l'hôte, contient l'état général ?
 WORLD = struct.Struct('<fffB')        # temps de jeu, score rouge, score bleu, fin de partie
 ARENA = struct.Struct('<hBB')         # contrôle (x10000), propriétaire, contestée
-HUMAN = struct.Struct('<Hff4f')       # joueur humain : n°, XP, réapparition, 4 bonus
-UNIT = struct.Struct('<HhhHHBH')      # n°, x, z, orientation, PV, niveau, drapeaux
+BUFFS = tuple(C.BUFFS)
+ITEM_KEYS = tuple(C.ITEMS)
+# joueur humain : n°, XP, réapparition, argent, 4 objets (255 : aucun), durée des bonus
+HUMAN = struct.Struct('<Hfff4B' + 'f' * len(BUFFS))
+UNIT = struct.Struct('<HhhHHHBH')     # n°, x, z, orientation, PV, PV max, niveau, drapeaux
 PSTATE = struct.Struct('<IHhhHB')     # invité -> hôte : numéro, vie, x, z, orientation, drapeaux
 COUNT = struct.Struct('<H')
 POS = 64.0                            # précision des positions : 1/64 d'unité
@@ -36,8 +39,7 @@ ROT = 65536 / 360                     # orientation = rotation_y d'Ursina (= -ca
 PER_PACKET = 80                       # unités par paquet (reste sous ~1100 octets)
 OWNER = {None: 0, 'rouge': 1, 'bleu': 2}
 OWNER_KEY = {0: None, 1: 'rouge', 2: 'bleu'}
-BUFFS = ('braise', 'flux', 'bastion', 'psy')
-ALIVE, ENABLED, VISIBLE, MOVING, ATTACK, CHARGE, STUN, BURN, SLOW = (1 << i for i in range(9))
+ALIVE, ENABLED, VISIBLE, MOVING, ATTACK, CHARGE, STUN, BURN, SLOW, MEGA, DYNA = (1 << i for i in range(11))
 
 
 def _num(v, lim=C.FIELD_RADIUS + 10):
@@ -78,8 +80,12 @@ def unit_record(u):
         f |= BURN
     if st['slow'] > 0:
         f |= SLOW
+    if u.transform_kind == 'mega':
+        f |= MEGA
+    elif u.transform_kind == 'dynamax':
+        f |= DYNA
     return (_q(c.get_x()), _q(c.get_z()), int((-c.get_h() % 360) * ROT) & 0xFFFF,
-            max(0, min(65535, int(math.ceil(u.hp)))), u.level, f)
+            max(0, min(65535, int(math.ceil(u.hp)))), max(1, min(65535, int(u.max_hp))), u.level, f)
 
 
 # ==================================================================== hôte
@@ -131,7 +137,13 @@ class HostSync:
                 r.brain.receive(r.brain.life, _num(p[0]), _num(p[1]), r.brain.net_rot, r.brain.net_moving)
                 r.brain.follow(1.0)           # l'attaque part d'où l'invité l'a lancée
             d = msg.get('d') or (0, 0)
-            r.brain.remote_use(str(msg.get('k')), int(msg.get('tg', -1)), _num(d[0], 1), _num(d[1], 1))
+            pt = msg.get('pt')
+            point = Vec3(_num(pt[0]), 0, _num(pt[1])) if pt else None
+            r.brain.remote_use(str(msg.get('k')), int(msg.get('tg', -1)), _num(d[0], 1), _num(d[1], 1), point)
+        elif t == 'buy' and r is not None:
+            self.m.buy(r, str(msg.get('i')))
+        elif t == 'sell' and r is not None:
+            self.m.sell(r, int(msg.get('n', -1)))
         elif t == 'dash' and r is not None:
             r.brain.remote_dash()
         elif t == 'pong':
@@ -187,9 +199,12 @@ class HostSync:
             if camp['alive']:
                 bits[i >> 3] |= 1 << (i & 7)
         world.append(bytes(bits))
+        world.append(bytes([sum(1 << i for i, p in enumerate(m.pads) if p['alive'])]))
         world.append(bytes([len(m.humans)]))
         for h in m.humans:
-            world.append(HUMAN.pack(h.uid, h.xp, max(0.0, h.respawn_t), *(max(0.0, h.buffs.get(b, 0.0)) for b in BUFFS)))
+            items = [ITEM_KEYS.index(k) for k in h.items[:4]] + [255] * (4 - len(h.items[:4]))
+            world.append(HUMAN.pack(h.uid, h.xp, max(0.0, h.respawn_t), h.gold, *items,
+                                    *(max(0.0, h.buffs.get(b, 0.0)) for b in BUFFS)))
         records = []
         for u in m.units:
             r = unit_record(u)
@@ -235,10 +250,13 @@ class ClientSync:
         return units[uid] if isinstance(uid, int) and 0 <= uid < len(units) else None
 
     # ------------------------------------------------------------ envoi
-    def send_use(self, key, target, d):
+    def send_use(self, key, target, d, point=None):
         p = self.m.player.position
-        self.link.send({'t': 'use', 'k': key, 'tg': target.uid if target is not None else -1,
-                        'd': [round(d.x, 3), round(d.z, 3)], 'p': [round(p.x, 3), round(p.z, 3)]})
+        msg = {'t': 'use', 'k': key, 'tg': target.uid if target is not None else -1,
+               'd': [round(d.x, 3), round(d.z, 3)], 'p': [round(p.x, 3), round(p.z, 3)]}
+        if point is not None:
+            msg['pt'] = [round(point.x, 3), round(point.z, 3)]
+        self.link.send(msg)
 
     def send_dash(self):
         self.link.send({'t': 'dash'})
@@ -317,6 +335,8 @@ class ClientSync:
             nbits = (len(camps) + 7) // 8
             bits = data[off:off + nbits]
             off += nbits
+            pads = data[off]
+            off += 1
             nh = data[off]
             off += 1
             humans = []
@@ -327,24 +347,32 @@ class ClientSync:
                 self.world_seq = seq
                 for i, camp in enumerate(camps):
                     camp['alive'] = bool(bits[i >> 3] & (1 << (i & 7)))
-                for uid, xp, respawn_t, *buffs in humans:
+                for i, pad in enumerate(m.pads):
+                    if pad['alive'] != bool(pads & (1 << i)):
+                        m._set_pad(pad, bool(pads & (1 << i)))
+                for uid, xp, respawn_t, gold, i0, i1, i2, i3, *buffs in humans:
                     h = self.unit(uid)
                     if h is not None:
-                        h.xp, h.respawn_t = xp, respawn_t
-                        h.buffs = {b: v for b, v in zip(BUFFS, buffs) if v > 0}
+                        h.xp, h.respawn_t, h.gold = xp, respawn_t, gold
+                        items = [ITEM_KEYS[i] for i in (i0, i1, i2, i3) if i < len(ITEM_KEYS)]
+                        new = {b: v for b, v in zip(BUFFS, buffs) if v > 0}
+                        changed = set(new) != set(h.buffs) or items != h.items
+                        h.buffs, h.items = new, items
+                        if changed:
+                            h.recalc_stats()
                 m.apply_world(t, sr, sb, end, [(c / 10000, OWNER_KEY.get(o), bool(k)) for c, o, k in arenas])
         n = COUNT.unpack_from(data, off)[0]
         off += COUNT.size
         for _ in range(n):
-            uid, x, z, rot, hp, level, flags = UNIT.unpack_from(data, off)
+            uid, x, z, rot, hp, max_hp, level, flags = UNIT.unpack_from(data, off)
             off += UNIT.size
             u = self.unit(uid)
             if u is None or seq <= getattr(u, 'net_seq', -1):
                 continue
             u.net_seq = seq
-            self._apply_unit(u, clock, x / POS, z / POS, rot / ROT, hp, level, flags)
+            self._apply_unit(u, clock, x / POS, z / POS, rot / ROT, hp, max_hp, level, flags)
 
-    def _apply_unit(self, u, clock, x, z, rot, hp, level, flags):
+    def _apply_unit(self, u, clock, x, z, rot, hp, max_hp, level, flags):
         alive = bool(flags & ALIVE)
         local = u is self.m.player
         if u.alive and not alive:                                  # mis K.O.
@@ -358,13 +386,18 @@ class ClientSync:
             u.creature.set_h(-rot)
             u.net_buf = [(clock, x, z, rot)]
         if level != u.level:
-            up = level > u.level
-            u.level = level
-            if up and u.alive:
-                u.level_fx()
-            u.check_evolution(show=up)
-        if hp != int(math.ceil(u.hp)):
+            u.set_level(level, show=level > u.level)
+        tk = 'mega' if flags & MEGA else 'dynamax' if flags & DYNA else None
+        if tk != u.transform_kind and u.kind == 'pokemon':            # Méga-Évolution / Dynamax
+            if u.transform_kind is not None:
+                u.end_transform()
+            if tk is not None:
+                u.start_transform(show=u.alive)
+        if hp != int(math.ceil(u.hp)) or max_hp != u._max_hp:
+            if not u.creature.enabled and flags & ENABLED and u.kind == 'tower':
+                u.creature.enabled = True
             u.hp = hp
+            u._max_hp = max_hp
             u._refresh_bar()
         c = u.creature
         if c.enabled != bool(flags & ENABLED):
@@ -457,10 +490,10 @@ class ClientSync:
             if o is not None:
                 m.hazards.append(Zone(m, o, Vec3(x, 0, z), radius, delay, 0, col_in(col), style=style))
         elif kind == 'wave':
-            _, owner, x, z, speed, max_r, col, start = e
+            _, owner, x, z, speed, max_r, col, start, kind = e
             o = self.unit(owner)
             if o is not None:
-                m.hazards.append(Wave(m, o, Vec3(x, 0, z), speed, max_r, 0, col_in(col), start=start))
+                m.hazards.append(Wave(m, o, Vec3(x, 0, z), speed, max_r, 0, col_in(col), start=start, kind=kind))
         elif kind == 'beam':
             _, owner, ox, oz, dx, dz, length, width, delay, col = e
             o = self.unit(owner)

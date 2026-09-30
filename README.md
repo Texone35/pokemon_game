@@ -83,16 +83,37 @@ python main.py
 
 | Touche | Action |
 |---|---|
-| Z Q S D | Se déplacer |
-| J (maintenir) | Attaque de base |
-| K L U I | Attaques spéciales |
-| Espace | Esquive |
-| Clic droit + glisser | Tourner la caméra |
+| Clic (droit ou gauche) au sol | Se déplacer à cet endroit (le Pokémon contourne les murs ; maintenir pour suivre la souris) |
+| Clic sur un adversaire | L'approcher puis l'auto-attaquer en continu |
+| Flèches | Se déplacer au clavier (annule l'ordre au clic) |
+| A (maintenir) | Auto-attaque ; à l'arrêt, le Pokémon attaque aussi tout seul l'adversaire à portée |
+| Q Z S D | Attaques n°1 à 4 : **maintenir** pour viser à la souris, **relâcher** pour lancer (les attaques autour du Pokémon partent tout de suite) |
+| E | Ultime (niveau 10) |
+| Clic gauche / clic droit (pendant la visée) | Lancer tout de suite / annuler |
+| F | Méga-Évolution ou Dynamax (selon le Pokémon) |
+| Espace | Esquive vers la souris (longue recharge, comme le Flash) |
+| B | Boutique (dans sa base, ou pendant qu'on est K.O.) |
 | Molette | Zoom |
-| Clic molette + glisser | Déplacer la vue |
+| Clic molette + glisser | Déplacer la vue (C : recentrer) |
 | Tab | Voir toute la carte |
 
-Dans le salon : **← →** ou clic pour choisir son Pokémon, **Entrée** pour valider, **Échap** pour revenir.
+Dans le salon : **← →** ou clic pour choisir son Pokémon, bouton **Build** pour choisir sa façon de
+le jouer (quand il en a plusieurs), **Entrée** pour valider, **Échap** pour revenir.
+
+## Déroulé d'une partie
+
+- **Stats** : chaque Pokémon a PV, Attaque, Défense, Attaque spéciale, Défense spéciale et Vitesse.
+  Elles montent avec le niveau selon son rôle (tank, combattant, rapide, sniper, soutien) et sa
+  courbe (« early » : fort tôt ; « late » : fort en fin de partie), et à chaque évolution.
+- **Attaques** : la 1re dès le niveau 1, puis une nouvelle aux niveaux 3, 5 et 7, l'ultime au
+  niveau 10. Les attaques visées à la souris frappent plus fort que celles à cible automatique.
+- **Argent (₽) et XP** : en mettant K.O. des adversaires, des Pokémon sauvages, des camps, des
+  sbires, des tours, et en capturant des arènes. La boutique propose 10 objets (3 emplacements).
+- **Arènes** : une tour défensive se dresse peu après la capture ; la météo de l'arène (pluie,
+  soleil, tempête de sable...) s'installe sur le quartier au profit de l'équipe qui la tient.
+- **Voies** : chaque arène contrôlée envoie des vagues de sbires vers les arènes voisines.
+- **Jungle** : Magmar, Lokhlass et Héliatronc donnent des buffs ; les buissons de Baies Sitrus
+  soignent puis repoussent au bout de 2 minutes.
 
 ## Jouer à deux
 
@@ -132,11 +153,24 @@ Les deux joueurs sont dans la même équipe (rouge), contre 5 adversaires contr�
 main.py             point d'entrée
 requirements.txt    dépendances Python
 game/
-  config.py         données du jeu (carte, espèces, attaques, équilibrage)
+  config.py         carte, arènes, espèces (aspect), équipes, réseau
+  balance/          TOUTES les valeurs d'équilibrage (stats, attaques, builds, objets, XP, argent,
+                    jungle, arènes, météo, tours, vagues...) : c'est ici qu'on règle le jeu
   match.py          une partie : règles, score, caméra, interface de jeu
   world/            le stade : carte, jungle, arènes, effets visuels
-  pokemon/          modèles 3D des Pokémon, IA, attaques
+  pokemon/          modèles 3D, unités, IA, attaques (moves.py), stats (kit.py), vagues (waves.py)
   network/          jeu à deux (connexion et synchronisation)
-  interface/        écrans d'accueil et éléments d'interface
+  interface/        écrans d'accueil, boutique et éléments d'interface
+tools/              tests automatiques et équilibrage
 archives/           anciennes versions du jeu (non utilisées)
+```
+
+## Tests et équilibrage
+
+```powershell
+python tools/smoke_test.py                  # une partie jouée par l'ordinateur, sans fenêtre (3 min)
+python tools/smoke_test.py --minutes 10 --fast --seed 4 --log parties/p4.json
+python tools/balance_report.py parties/*.json   # rythme des niveaux, argent, courbes early/late
+python tools/balance_table.py               # stats de chaque lignée par niveau
+python tools/net_test.py                    # partie à deux sur ce PC (hôte + invité)
 ```

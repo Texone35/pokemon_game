@@ -194,9 +194,10 @@ class Gallery(S.Stadium):
             d = C.SPECIES[sp]
             c = Creature(sp, parent=self.root, position=(x - 4.5 + k * 3, 0, z), scale=d['scale'])
             c.rotation_y = 180
-            w = 1.6 if d['hp'] < 1000 else 3.2
+            w = 1.6
             hb = HealthBar(c, d['scale'] * 1.5 + .5, w, col, badge, label, ALLY_BAR)
-            hp = d['hp'] * (1 + C.LEVEL_BONUS * (level - 1))
+            from game.pokemon import kit
+            hp = kit.team_stats(sp, sp, level)['hp']
             hb.set_level(level)
             hb.set(hp * (1 - .2 * k), hp)
             self.demo.append([c, hb, hp, hp * (1 - .2 * k)])

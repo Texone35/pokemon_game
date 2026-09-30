@@ -257,6 +257,65 @@ def build_magmar(g):
     return {'head_pivot': (0, 1.25, 0), 'tail_pivot': (0, .4, -.2)}
 
 
+def build_tour(g):
+    """Tour défensive d'une arène : socle hexagonal en pierre, pilier cerclé de métal, vasque et
+    cristal lumineux au sommet (teinté aux couleurs de l'équipe par Unit)."""
+    STONE, STONE2, DARK = color.rgb(.72, .7, .66), color.rgb(.6, .58, .55), color.rgb(.32, .31, .33)
+    METAL, GOLD_ = color.rgb(.45, .47, .52), color.rgb(.85, .7, .35)
+    b = g['body']
+    b.add('cyl6', (0, .15, 0), (2.2, .3, 2.2), col=STONE2, grad=.3)
+    b.add('cyl6', (0, .42, 0), (1.75, .26, 1.75), col=STONE, grad=.25)
+    b.add('cyl6', (0, 1.55, 0), (.85, 2.1, .85), col=STONE, grad=.35)
+    for y in (.75, 1.6, 2.45):                                   # cerclages de métal
+        b.add('cyl6', (0, y, 0), (.95, .1, .95), col=METAL)
+    for i in range(6):                                           # contreforts
+        a = math.radians(i * 60 + 30)
+        b.add('box', (math.sin(a) * .5, .95, math.cos(a) * .5), (.16, 1.1, .3), rot=(0, i * 60 + 30, 0), col=STONE2)
+        b.add('box', (math.sin(a) * .8, .62, math.cos(a) * .8), (.2, .2, .45), rot=(-30, i * 60 + 30, 0), col=DARK)
+    b.add('cone6', (0, 2.78, 0), (1.35, .45, 1.35), rot=(180, 0, 0), col=METAL)     # vasque
+    b.add('cyl6', (0, 2.98, 0), (1.4, .1, 1.4), col=GOLD_)
+    f = g['glow']
+    f.add('cone4', (0, 3.75, 0), (.55, .7, .55), col=color.rgb(1, 1, 1))
+    f.add('cone4', (0, 3.2, 0), (.55, .45, .55), rot=(180, 0, 0), col=color.rgb(.85, .85, .9))
+    return {'head_pivot': (0, 1, 0), 'no_tail': True, 'static': True}
+
+
+def build_heliatronc(g):
+    """Héliatronc : sauropode brun au long cou, quatre grandes feuilles en guise d'ailes sur le dos,
+    deux feuilles sur la tête et une grappe de fruits jaunes sous le menton."""
+    BODY, BELLY = color.rgb(.62, .45, .28), color.rgb(.78, .62, .42)
+    LEAF, LEAF2, VEIN = color.rgb(.24, .56, .2), color.rgb(.3, .64, .24), color.rgb(.16, .4, .14)
+    FRUIT, FRUIT_TIP = color.rgb(.98, .86, .3), color.rgb(.55, .42, .18)
+    b = g['body']
+    b.add('sphere', (0, .95, -.1), (1.35, 1.0, 1.8), col=BODY)
+    b.add('sphere', (0, .78, .1), (1.05, .7, 1.4), col=BELLY)
+    for sx in (-1, 1):
+        for sz in (-1, 1):
+            b.add('cyl', (sx * .45, .32, sz * .55), (.36, .7, .36), col=BODY)
+            b.add('sphere', (sx * .45, .06, sz * .55 + .08), (.4, .14, .44), col=BELLY)
+    b.add('cyl', (0, 1.55, .75), (.34, .95, .34), rot=(38, 0, 0), col=BODY)          # long cou
+    b.add('sphere', (0, 1.25, .5), (.5, .5, .5), col=BODY)
+    for s in (-1, 1):                                                                # feuilles-ailes
+        for k, (x, y, z, ang, ln) in enumerate(((.55, 1.5, .05, 28, 1.7), (.62, 1.38, -.55, 18, 1.5))):
+            b.add('sphere', (s * (x + .55), y + .25, z), (ln, .07, .75), rot=(0, 0, -s * ang), col=LEAF if k else LEAF2)
+            b.add('box', (s * (x + .55), y + .29, z), (ln * .9, .03, .05), rot=(0, 0, -s * ang), col=VEIN)
+    t = g['tail']
+    t.add('cone', (0, .05, -.3), (.35, .9, .35), rot=(-70, 0, 0), col=BODY)
+    h = g['head']
+    h.add('sphere', (0, .12, .15), (.5, .42, .62), col=BODY)
+    h.add('sphere', (0, .05, .4), (.32, .26, .3), col=BELLY)
+    for s in (-1, 1):                                                                # feuilles sur la tête
+        h.add('sphere', (s * .16, .45, -.12), (.14, .05, .55), rot=(-35, s * 18, 0), col=LEAF2)
+    _eyes(h, .16, .2, .33, .09, .11, iris=color.rgb(.15, .1, .05))
+    for i in range(5):                                                               # grappe de fruits
+        a = math.radians(i * 72)
+        x, z = math.sin(a) * .1, .22 + math.cos(a) * .08
+        h.add('sphere', (x, -.3, z), (.09, .3, .09), rot=(math.degrees(a) * .2, 0, math.sin(a) * 12), col=FRUIT)
+        h.add('sphere', (x, -.46, z), .04, col=FRUIT_TIP)
+    h.add('cyl', (0, -.12, .22), (.05, .14, .05), col=VEIN)
+    return {'head_pivot': (0, 2.05, 1.12), 'tail_pivot': (0, .9, -.95)}
+
+
 def build_lokhlass(g):
     B, CREAM, SHELL = color.rgb(.35, .62, .9), color.rgb(.95, .92, .8), color.rgb(.55, .6, .7)
     b = g['body']
@@ -560,6 +619,68 @@ def build_dracaufeu(g):
     return {'head_pivot': (0, 1.72, .22), 'tail_pivot': tuple(tp), 'glow_parent': 'tail'}
 
 
+def build_mega_dracaufeu(g):
+    """Méga-Dracaufeu X : corps noir charbon, ventre et membranes des ailes bleus, flammes bleues
+    (bouche, épaules et bout de la queue), cornes plus longues et ailes plus anguleuses."""
+    O, CREAM, BLUE = color.rgb(.16, .16, .2), color.rgb(.45, .72, .95), color.rgb(.15, .42, .95)
+    CLAW, HORN = color.rgb(.95, .96, .98), color.rgb(.2, .5, 1)
+    b = g['body']
+    b.add('sphere', (0, .95, 0), (.88, 1.2, .76), col=O)
+    b.add('sphere', (0, .88, .17), (.6, .95, .46), col=CREAM)
+    b.add('cyl', (0, 1.5, .1), (.32, .52, .32), rot=(15, 0, 0), col=O)
+    for s in (-1, 1):
+        b.add('cyl', (s * .26, .36, 0), (.33, .58, .33), col=O)
+        b.add('sphere', (s * .26, .08, .12), (.33, .17, .46), col=O)
+        for k in (-1, 0, 1):
+            b.add('cone', (s * .26 + k * .08, .07, .38), (.05, .12, .05), rot=(90, 0, 0), col=CLAW)
+        b.add('sphere', (s * .44, 1.1, .18), (.15, .42, .15), rot=(40, 0, s * 20), col=O)
+        b.add('cone', (s * .5, 1.5, -.1), (.12, .4, .12), rot=(-20, 0, -s * 40), col=BLUE)        # pointes d'épaule
+        for k, (x, y, sx, sy, a) in enumerate(((.8, 1.62, .56, 1.05, 22), (1.14, 1.92, .5, .95, 42),
+                                               (.55, 1.7, .46, .78, 6))):
+            b.add('sphere', (s * x, y, -.52), (sx, sy, .05), rot=(-12, 0, -s * a), col=O)
+            b.add('sphere', (s * x, y - .02, -.48), (sx * .9, sy * .9, .04), rot=(-12, 0, -s * a), col=BLUE)
+    h = g['head']
+    h.add('sphere', (0, .22, .05), (.6, .5, .62), col=O)
+    h.add('sphere', (0, .14, .34), (.42, .28, .45), col=O)
+    for s in (-1, 1):
+        h.add('cone', (s * .17, .52, -.25), (.1, .6, .1), rot=(-62, 0, -s * 10), col=HORN)
+    _eyes(h, .16, .3, .26, .11, .13, iris=color.rgb(.9, .15, .15))
+    h.add('box', (0, .05, .5), (.3, .025, .03), col=color.rgb(.1, .2, .5))
+    t = g['tail']
+    t.add('sphere', (0, .02, -.12), .27, col=O)
+    t.add('cone', (0, .22, -.5), (.32, 1.2, .32), rot=(-62, 0, 0), col=O)
+    f = g['glow']
+    tp = Vec3(0, .5, -.3)
+    tip = tp + Vec3(0, .22 + .6 * math.cos(math.radians(62)), -.5 - .6 * math.sin(math.radians(62)))
+    f.add('sphere', tuple(tip + Vec3(0, .14, 0)), (.55, .65, .55), col=color.rgb(.1, .35, 1))
+    f.add('cone', tuple(tip + Vec3(0, .46, 0)), (.46, .95, .46), col=color.rgb(.3, .6, 1))
+    f.add('cone', tuple(tip + Vec3(0, .4, 0)), (.24, .72, .24), col=color.rgb(.8, .92, 1))
+    return {'head_pivot': (0, 1.8, .22), 'tail_pivot': tuple(tp), 'glow_parent': 'tail'}
+
+
+def build_mega_florizarre(g):
+    """Méga-Florizarre : Florizarre plus massif, fleur géante à deux rangs de pétales, fleur rose
+    sur le front et grandes feuilles."""
+    info = build_florizarre(g)
+    PETAL, CORE, LEAF = color.rgb(.98, .38, .48), color.rgb(1, .9, .4), color.rgb(.15, .45, .2)
+    b, h, t = g['body'], g['head'], g['tail']
+    b.add('sphere', (0, .78, -.05), (1.62, 1.0, 1.75), col=color.rgb(.34, .62, .6))       # carrure
+    for i in range(7):                                                            # 2e rang de pétales
+        a = i * 360 / 7 + 20
+        ax, az = math.sin(math.radians(a)), math.cos(math.radians(a))
+        t.add('sphere', (ax * .95, .5, az * .95), (.85, .18, 1.05), rot=(22, a, 0), col=PETAL)
+    t.add('sphere', (0, .82, 0), (.55, .36, .55), col=CORE)
+    for i in range(5):                                                            # feuilles plus grandes
+        a = i * 72 + 12
+        ax, az = math.sin(math.radians(a)), math.cos(math.radians(a))
+        t.add('sphere', (ax * 1.25, .15, az * 1.25), (.8, .1, 1.45), rot=(20, a, 0), col=LEAF)
+    for k in range(5):                                                            # fleur sur le front
+        a = math.radians(k * 72)
+        h.add('sphere', (math.sin(a) * .12, .5 + math.cos(a) * .12, .45), (.12, .12, .05), col=PETAL)
+    h.add('sphere', (0, .5, .47), .06, col=CORE)
+    return info
+
+
 def build_carabaffe(g):
     B, SHELL, BELLY = color.rgb(.42, .58, .9), color.rgb(.58, .32, .14), color.rgb(1, .88, .55)
     PLATE, RIM, FUR = color.rgb(.48, .25, .1), color.rgb(.97, .96, .9), color.rgb(.9, .93, 1)
@@ -815,6 +936,8 @@ BUILDERS = {
     'mega_raichu': build_mega_raichu,
     'reptincel': build_reptincel,
     'dracaufeu': build_dracaufeu,
+    'mega_dracaufeu': build_mega_dracaufeu,
+    'mega_florizarre': build_mega_florizarre,
     'carabaffe': build_carabaffe,
     'tortank': build_tortank,
     'herbizarre': build_herbizarre,
@@ -833,6 +956,8 @@ BUILDERS = {
     'magmar': build_magmar,
     'lokhlass': build_lokhlass,
     'torterra': build_torterra,
+    'heliatronc': build_heliatronc,
+    'tour': build_tour,
     'mewtwo': build_mewtwo,
     'regigigas': build_regigigas,
     'chenipan': build_chenipan,
@@ -883,8 +1008,9 @@ class Creature(Entity):
             origin = Vec3(*info.get('tail_pivot', (0, 0, 0))) if parent is self.tail else Vec3(0, 0, 0)
             self.glow = part(groups['glow'], parent, -origin, emissive=1.0)
 
-        big = ('bulbizarre', 'racaillou', 'lokhlass', 'torterra', 'regigigas', 'herbizarre', 'florizarre',
-               'gravalanch', 'grolem', 'tortank', 'dracaufeu', 'oniglali', 'mega_oniglali') + BIG_MORE
+        big = ('bulbizarre', 'racaillou', 'lokhlass', 'torterra', 'heliatronc', 'regigigas', 'herbizarre', 'florizarre',
+               'gravalanch', 'grolem', 'tortank', 'dracaufeu', 'oniglali', 'mega_oniglali', 'mega_dracaufeu',
+               'mega_florizarre') + BIG_MORE
         self.shadow = flat_circle(self, .55 * scale * (1.4 if species in big else 1),
                                   color.rgba(0, 0, 0, .28), y=.03)
         self._t = 0
@@ -897,6 +1023,14 @@ class Creature(Entity):
             return
         self._t += dt
         t = self._t
+        if self.info.get('static'):                   # tour : seul le cristal tourne doucement
+            if self.glow is not None:
+                self.glow.rotation_y = t * 40
+            if self._flash_timer > 0:
+                self._flash_timer -= dt
+                if self._flash_timer <= 0:
+                    self.set_flash(Vec4(1, 1, 1, 0))
+            return
         floating = self.info.get('float')
         if floating:
             self.pivot.y = .35 + math.sin(t * 2.5) * .15

@@ -30,10 +30,11 @@ TEAM_R = 16              # rayon d'évaluation du rapport de force
 
 
 def strength(u):
-    """Force de combat approximative d'un Pokémon : PV x niveau x effet du terrain."""
+    """Force de combat approximative d'un Pokémon : PV x puissance d'attaque x effet du terrain."""
     if not u.alive:
         return 0.0
-    k = (1 + C.LEVEL_BONUS * (u.level - 1)) * (1 + u.zone_mod('dmg')) / (1 + u.zone_mod('taken'))
+    st = u.stats
+    k = (1 + max(st['atk'], st['spa']) / 100) * (1 + u.zone_mod('dmg')) / (1 + u.zone_mod('taken'))
     return u.hp * k
 
 
@@ -72,7 +73,7 @@ class ExpertBrain(BotBrain):
         u, m = self.u, self.m
         out = []
         for e in m.units:
-            if e.alive and e.team and e.team != u.team and e not in m.hidden[u.team] and m.in_vision(u.team, e):
+            if e.alive and e.kind == 'pokemon' and e.team != u.team and e not in m.hidden[u.team]                     and m.in_vision(u.team, e):
                 if (flat(e.position) - flat(pos)).length() < r:
                     out.append(e)
         return out
@@ -131,7 +132,7 @@ class ExpertBrain(BotBrain):
             if s < score:
                 best, score = e, s
         t = self.target
-        if t is not None and t.alive and t.team and t.hp_ratio() < .3 and t not in m.hidden[u.team] \
+        if t is not None and t.alive and t.kind == 'pokemon' and t.hp_ratio() < .3 and t not in m.hidden[u.team] \
                 and (flat(t.position - u.position)).length() < CHASE:
             best = t                             # on achève un adversaire affaibli
         if best is not None:
@@ -158,6 +159,14 @@ class ExpertBrain(BotBrain):
         u, m = self.u, self.m
         if self.target is not None or not self.goal:
             return
+        tower = m.enemy_tower_near(u, 18)
+        if tower is not None and self.balance() >= 1:
+            self.target = tower
+            return
+        minion = m.enemy_minion_near(u, 9)
+        if minion is not None:
+            self.target = minion
+            return
         if self.goal[0].startswith(('camp', 'wild', 'pit')):
             gp = self.goal[1]
             if (flat(u.position) - gp).length() < 14:
@@ -175,7 +184,7 @@ class ExpertBrain(BotBrain):
         u, m = self.u, self.m
         base = m.base_goal(u.team)
         if u.hp_ratio() < .3:
-            return base
+            return self.heal_goal()
         enemy = 'bleu' if u.team == 'rouge' else 'rouge'
         best, bd = base, (base[1] - flat(u.position)).length()
         for a in m.arenas:
@@ -243,6 +252,7 @@ class ExpertBrain(BotBrain):
     def update(self, dt):
         u, m = self.u, self.m
         self.think_t -= dt
+        self.move_t -= dt
         if self.think_t <= 0:
             self.think_t = .22 + random.random() * .12            # réagit plus vite que l'IA facile
             self.think()
@@ -254,11 +264,12 @@ class ExpertBrain(BotBrain):
         if t is not None and (not t.alive or (t.team is None and self.mode == 'retreat') or t in m.hidden[u.team]):
             self.target = t = None
         # repli (ou combat perdu d'avance) : on court vers l'abri en tirant sur le poursuivant
-        if self.mode == 'retreat' or (t is not None and t.team and not self.fight_ok):
+        if self.mode == 'retreat' or (t is not None and t.kind == 'pokemon' and not self.fight_ok):
             moved = self._go(self.goal, dt) if self.goal else False
-            chaser = t or next(iter(self._enemies(u.position, u.data['attack']['range'] + 1)), None)
+            chaser = t or next(iter(self._enemies(u.position, u.auto['range'] + 1)), None)
             if chaser is not None and m.can_see(u, chaser) and u.in_attack_range(chaser):
                 u.basic_attack(chaser)
+            self.use_moves(chaser, (flat(chaser.position - u.position)).length() if chaser is not None else 0)
             return moved
         if t is not None:
             return self._fight(t, dt)
@@ -303,7 +314,7 @@ class ExpertBrain(BotBrain):
             u.face(dirn, dt, 14)
             return moved
         self.blind = 0.0
-        a = u.data['attack']
+        a = u.auto
         rng = a['range'] + t.radius
         side = Vec3(dirn.z, 0, -dirn.x)
         self.orbit_t -= dt
@@ -313,7 +324,7 @@ class ExpertBrain(BotBrain):
         if self.dodge is not None:
             move = self.dodge
         elif a['kind'] == 'ranged':
-            ideal = rng * (.62 if t.data['attack']['kind'] == 'melee' else .8)   # hors de portée d'un corps-à-corps
+            ideal = rng * (.62 if t.auto['kind'] == 'melee' else .8)   # hors de portée d'un corps-à-corps
             if d > rng * .92:
                 move = dirn + side * self.strafe * .3
             elif d < ideal - 1.5:
@@ -326,37 +337,8 @@ class ExpertBrain(BotBrain):
         u.face(dirn, dt, 16)
         if d < rng:
             u.basic_attack(t)
-        self._use_special(t, d)
+        self.use_moves(t, d)
         return moved
-
-    def _use_special(self, t, d):
-        u, m = self.u, self.m
-        sp = u.data.get('special')
-        if not sp or u.special_cd > 0:
-            return
-        k = sp['kind']
-        weak = t.hp_ratio() < .35 or t.status['slow'] > 0 or t.status['stun'] > 0
-        if k == 'heal':
-            if any(a.alive and a.hp < a.max_hp * .6 and (flat(a.position - u.position)).length() < sp['radius']
-                   for a in m.team_units[u.team]):
-                u.try_special(t)
-            return
-        if k in ('wave', 'nova'):
-            r = sp.get('radius', 8) * .8 if k == 'wave' else 9
-            n = len([e for e in self._enemies(u.position, r) if e.team])
-            if d < r and (n >= 2 or weak or u.hp_ratio() < .4 or t.team is None):
-                u.try_special(t)
-        elif k == 'beam':
-            if d < sp.get('length', 12) * .85:
-                u.try_special(t)
-        elif k == 'zone':
-            if d < 13 and (weak or len(self._enemies(t.position, 3.5)) >= 2 or t.team is None
-                           or t.vel.length() < 1.5):
-                u.try_special(t)
-        elif k == 'charge':
-            if 3 < d < 12 and (weak or self.balance() > 1.2):
-                u.try_special(t)
-
 
 # ==================================================================== objectifs d'équipe
 def expert_goal(m, u, current):
@@ -364,6 +346,8 @@ def expert_goal(m, u, current):
     team = u.team
     enemy = 'bleu' if team == 'rouge' else 'rouge'
     here = flat(u.position)
+    if m.wants_shop(u):
+        return m.base_goal(team)
     boss = m.active_boss()
     if boss is not None:
         at_pit = sum(1 for e in m.team_units[enemy] if e.alive and (flat(e.position)).length() < 20)

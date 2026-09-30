@@ -631,6 +631,19 @@ class ChunkedBuilder:
         return [b.static(parent, emissive, **kw) for b in self.parts.values() if b.count]
 
 
+def destroy_tree(entity):
+    """Détruit une entité ET toutes ses entités enfants. (destroy d'Ursina laisse les enfants dans
+    la liste des entités parcourues à chaque image : ils ralentiraient la partie peu à peu.)"""
+    from ursina import destroy
+    stack, order = [entity], []
+    while stack:
+        e = stack.pop()
+        order.append(e)
+        stack.extend(e.children)
+    for e in reversed(order):
+        destroy(e)
+
+
 def flat_circle(parent, radius, col, y=0.02, **kwargs):
     """Disque plat non éclairé (ombres portées, zones d'attaque...)."""
     from ursina import Circle

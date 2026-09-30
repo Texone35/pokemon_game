@@ -87,11 +87,16 @@ class HealthBar:
         step = TICK_HP if max_hp < 6000 else TICK_HP * 2
         n = int((max_hp - 1) // step)
         if n == len(self.ticks) and step == self.tick_hp:
+            if max_hp != getattr(self, 'tick_max', max_hp):         # même nombre : on les replace
+                self.tick_max = max_hp
+                for i, t in enumerate(self.ticks):
+                    t.x = -self.w / 2 + self.w * (i + 1) * step / max_hp
             return
         from ursina import destroy
         for t in self.ticks:
             destroy(t)
         self.tick_hp = step
         self.ticks = [Entity(parent=self.root, model='quad', color=color.rgba(0, 0, 0, .55), z=-.015,
-                             x=-self.w / 2 + self.w * (i + 1) * step / max_hp, y=-.03, scale=(.025, .14))
+                             x=-self.w / 2 + self.w * (i + 1) * step / max_hp, y=-.03, scale=(.025, .14), ignore=True)
                       for i in range(n)]
+        self.tick_max = max_hp

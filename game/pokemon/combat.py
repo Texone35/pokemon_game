@@ -65,8 +65,9 @@ def _shape_mesh(parent, shape, size, col):
 
 class Projectile:
     def __init__(self, match, owner, pos, vel, damage, size, col, shape='sphere', homing=None, turn=0.0,
-                 life=2.0, status=None, stun=0.0, pid=None):
+                 life=2.0, status=None, stun=0.0, pid=None, cat='phys', on_hit=None):
         self.match, self.owner = match, owner
+        self.cat, self.on_hit = cat, on_hit
         self.pid = pid
         self.vel = Vec3(vel)
         self.damage, self.radius, self.col = damage, size * .5, col
@@ -77,7 +78,7 @@ class Projectile:
         self.st = style(owner.type)
         self.kind = owner.type
         self._trail = 0.0
-        self.e = Entity(parent=match.root, position=pos)
+        self.e = Entity(parent=match.root, position=pos, ignore=True)     # mis à jour ici, pas par Ursina
         core = self.st['core']
         if shape == 'cage':
             self.halo = glow_sprite(self.e, (.5, .9, 1, .9), size * 2.8)
@@ -86,6 +87,8 @@ class Projectile:
             self.halo = glow_sprite(self.e, (col[0], col[1], col[2], .95), size * 2.6)
             glow_sprite(self.e, (1, 1, 1, .9) if shape == 'sphere' else (core[0], core[1], core[2], .6), size * 1.1)
         self.mesh = _shape_mesh(self.e, shape, size, col)
+        if self.mesh is not None:
+            self.mesh.ignore = True
         orient(self.e, self.vel)
         if match.authority and match.net is not None:
             self.pid = match.net.new_pid()
@@ -128,7 +131,9 @@ class Projectile:
         for u in self.match.units:
             if u.alive and self.match.hostile(self.owner, u):
                 if (flat(u.position) - flat(p)).length() < self.radius + u.radius * .85:
-                    self.match.deal_damage(self.owner, u, self.damage, self.status, self.stun)
+                    self.match.deal_damage(self.owner, u, self.damage, self.status, self.stun, cat=self.cat)
+                    if self.on_hit is not None:
+                        self.on_hit(u)
                     self.kill()
                     return
 
@@ -150,14 +155,19 @@ class Projectile:
         if impact and fx.PARTICLES and _near_camera(self.match, self.e.position, 60):
             p = self.e.position
             fx.impact(self.kind, p, self.radius, ground=self.match.stadium.walk_y(p.x, p.z))
+        if self.mesh is not None:
+            destroy(self.mesh)
         destroy(self.e)
 
 
 class Zone:
     """Zone annoncée au sol, puis explosion (ou éclair) qui touche tout ce qui est dedans."""
 
-    def __init__(self, match, owner, pos, radius, delay, damage, col, status=None, style='explosion', stun=0.0):
+    def __init__(self, match, owner, pos, radius, delay, damage, col, status=None, style='explosion', stun=0.0,
+                 cat='phys'):
         self.match, self.owner = match, owner
+        self.cat = cat
+        delay = max(.05, delay)
         self.pos, self.radius, self.delay, self.timer = flat(pos), radius, delay, delay
         self.damage, self.col, self.status, self.style, self.stun = damage, col, status, style, stun
         self.alive = True
@@ -165,6 +175,7 @@ class Zone:
         self.outline = flat_circle(match.root, radius, warn_color(owner), position=self.pos + Vec3(0, gy + .12, 0))
         self.fill = flat_circle(match.root, radius, color.rgba(col[0], col[1], col[2], .45),
                                 position=self.pos + Vec3(0, gy + .13, 0), scale=.01)
+        self.outline.ignore = self.fill.ignore = True
         match.emit('zone', owner.uid, round(self.pos.x, 3), round(self.pos.z, 3), radius, delay, rc(col), style)
 
     def update(self, dt):
@@ -226,7 +237,7 @@ class Zone:
         for u in m.units:          # l'explosion ne traverse pas les murs
             if u.alive and m.hostile(self.owner, u) and (flat(u.position) - self.pos).length() < self.radius + u.radius \
                     and m.stadium.sees(self.pos, u.position):
-                m.deal_damage(self.owner, u, self.damage, self.status, self.stun)
+                m.deal_damage(self.owner, u, self.damage, self.status, self.stun, cat=self.cat)
 
     def cleanup(self):
         if self.alive:
@@ -238,8 +249,10 @@ class Zone:
 class Wave:
     """Onde de choc circulaire qui s'élargit ; touche une fois chaque cible."""
 
-    def __init__(self, match, owner, centre, speed, max_radius, damage, col, status=None, start=1.0):
+    def __init__(self, match, owner, centre, speed, max_radius, damage, col, status=None, start=1.0, stun=0.0,
+                 cat='phys', kind=None):
         self.match, self.owner = match, owner
+        self.stun, self.cat = stun, cat
         self.centre, self.speed, self.max_radius = flat(centre), speed, max_radius
         self.damage, self.status, self.col = damage, status, col
         self.r = start
@@ -247,15 +260,14 @@ class Wave:
         self.alive = True
         self.gy = match.stadium.walk_y(self.centre.x, self.centre.z)
         self._emit = 0.0
-        sp = owner.data.get('special') or {}
-        self.kind = sp.get('fx') if sp.get('kind') == 'wave' and sp.get('fx') else owner.type
+        self.kind = kind or owner.type
         if fx.PARTICLES and _near_camera(match, self.centre, 60):   # front de l'onde : anneau au sol
             st = style(self.kind)
             fx.ground_ring(fx.PARTICLES, (self.centre.x, self.gy + .15, self.centre.z), st['hot'], max(start, .5),
                            max_radius, (max_radius - start) / speed, alpha=.85)
             fx.PARTICLES.emit((self.centre.x, self.gy + .8, self.centre.z), st['hot'], size=3, life=.15, grow=1.5)
         match.emit('wave', owner.uid, round(self.centre.x, 3), round(self.centre.z, 3), speed, max_radius,
-                   rc(col), start)
+                   rc(col), start, self.kind)
 
     def update(self, dt):
         self.r += self.speed * dt
@@ -270,7 +282,7 @@ class Wave:
                 if abs(d - self.r) < .9 + u.radius * .5:
                     self.hit.add(id(u))
                     if m.stadium.sees(self.centre, u.position):     # un mur arrête l'onde
-                        m.deal_damage(self.owner, u, self.damage, self.status)
+                        m.deal_damage(self.owner, u, self.damage, self.status, self.stun, cat=self.cat)
         if self.r >= self.max_radius:
             self.cleanup()
 
@@ -326,8 +338,11 @@ class Wave:
 class Beam:
     """Rayon : une bande au sol annonce la trajectoire, puis un jet de lumière part."""
 
-    def __init__(self, match, owner, origin, direction, length, width, delay, damage, col, status=None):
+    def __init__(self, match, owner, origin, direction, length, width, delay, damage, col, status=None, stun=0.0,
+                 cat='phys'):
         self.match, self.owner = match, owner
+        self.stun, self.cat = stun, cat
+        delay = max(.05, delay)
         self.origin, self.dir = flat(origin), flat(direction).normalized()
         # le rayon s'arrête sur le premier mur ou obstacle rencontré
         length = max(1.0, length * match.stadium.clear_line(self.origin, self.origin + self.dir * length, .5))
@@ -341,7 +356,7 @@ class Beam:
         self.y = owner.position.y
         self.tele = Entity(parent=match.root, model='cube', color=warn_color(owner),
                            position=self.mid + Vec3(0, self.y + .12, 0), scale=(width * .2, .02, length),
-                           rotation_y=self.yaw)
+                           rotation_y=self.yaw, ignore=True)
         self.beam = None
         self.sprites = []
         match.emit('beam', owner.uid, round(self.origin.x, 3), round(self.origin.z, 3), round(self.dir.x, 4),
@@ -374,7 +389,7 @@ class Beam:
                 perp = (rel - self.dir * along).length()
                 if 0 < along < self.length and perp < self.width / 2 + u.radius * .8:
                     self.hit.add(id(u))
-                    m.deal_damage(self.owner, u, self.damage, self.status)
+                    m.deal_damage(self.owner, u, self.damage, self.status, self.stun, cat=self.cat)
         if self.fire_t <= 0:
             self.cleanup()
 
@@ -405,7 +420,7 @@ class Beam:
 
     def _fire(self):
         st = style(self.owner.type)
-        self.beam = Entity(parent=self.match.root)
+        self.beam = Entity(parent=self.match.root, ignore=True)
         if self.owner.type == 'feu':                  # le lance-flammes est fait de particules
             self.fire_t = .45
             self.match.shake_at(self.mid, .3)
@@ -429,50 +444,13 @@ class Beam:
                 destroy(self.beam)
 
 
-def cast_special(match, u, target):
-    """Lance la capacité spéciale de l'unité `u` (définie dans config.SPECIES)."""
-    sp = u.data['special']
-    kind = sp['kind']
-    col = sp.get('color', color.white)
-    dmg = sp.get('damage', 0)
-    status = sp.get('status')
-    origin = u.position + Vec3(0, .9, 0)
-    to_t = flat(target.position - u.position) if target else flat(u.facing())
-    d = to_t.normalized() if to_t.length() > .01 else Vec3(0, 0, 1)
-    u.face(d)
-    match.announce_cast(u, sp['name'])
-    if kind == 'beam':
-        match.hazards.append(Beam(match, u, u.position + d * u.radius, d, sp['length'], sp['width'], sp['delay'],
-                                  dmg, col, status))
-        u.channel = sp['delay'] + .35
-    elif kind == 'wave':
-        match.hazards.append(Wave(match, u, u.position, sp['speed'], sp['radius'], dmg, col, status, start=u.radius))
-        u.pulse()
-    elif kind == 'zone':
-        p = target.position if target else match.stadium.reach(u.position, u.position + d * 6)
-        match.hazards.append(Zone(match, u, p, sp['radius'], sp['delay'], dmg, col, status,
-                                  style=sp.get('style', 'explosion')))
-    elif kind == 'nova':
-        n = sp['count']
-        base = random.uniform(0, math.tau)
-        for i in range(n):
-            a = base + math.tau * i / n
-            v = Vec3(math.sin(a), 0, math.cos(a)) * sp['speed']
-            match.projectiles.append(Projectile(match, u, origin + v.normalized() * u.radius, v, dmg,
-                                                sp.get('size', .6), col, life=2.2, status=status))
-        u.pulse()
-    elif kind == 'charge':
-        u.start_charge(d, sp['speed'], sp['duration'], dmg)
-    elif kind == 'heal':
-        heal_area(match, u, sp['heal'], sp['radius'], col)
-
-
 def heal_area(match, u, amount, radius, col):
     """Soigne u et ses alliés proches (Synthèse, Soin...)."""
     for a in match.units:
         if a.alive and a.team == u.team and (flat(a.position - u.position)).length() < radius:
-            match.add_stat(u, 'heal', min(amount, a.max_hp - a.hp))
-            a.heal(amount)
+            got = amount * (1 + a.mods['heal_boost'])
+            match.add_stat(u, 'heal', min(got, a.max_hp - a.hp))
+            a.heal(got)
     heal_fx(match, u, radius, col)
     match.emit('healfx', u.uid, radius, rc(col))
 

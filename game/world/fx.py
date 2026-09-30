@@ -820,25 +820,31 @@ class Arcs:
 
 # ==================================================================== météo des arènes
 class ArenaWeather:
-    """Météo propre à chaque arène, dessinée avec les particules de la partie :
+    """Météo d'une arène, dessinée avec les particules de la partie. Elle ne tombe que lorsque
+    l'arène est contrôlée par une équipe, sur tout son quartier (rayon `radius`), mais les
+    particules ne sont émises qu'autour de la caméra (disque de rayon LOCAL) : le coût reste
+    celui d'une seule arène, quelle que soit la taille du quartier.
 
       pluie  : averse en traits fins, éclaboussures et ronds dans l'eau au sol, brume basse
       orage  : averse plus forte et oblique, foudre ramifiée avec flash et impact au sol
       sable  : tempête de sable : nappes de poussière qui défilent avec le vent, grains en traits
       pollen : pollen lumineux qui flotte, pétales et feuilles qui tombent en tournoyant
-      soleil : chaleur du volcan : braises qui montent, cendres qui tombent, fumerolles
+      soleil : chaleur écrasante : braises qui montent, cendres qui tombent, air qui tremble"""
+    LOCAL = 16.0
 
-    Rien n'est émis si l'arène est loin de la caméra."""
-
-    def __init__(self, parent, centre, radius, kind, type_color, count=40, rng=random, base=0.0):
+    def __init__(self, parent, centre, radius, kind, type_color, count=40, rng=random, base=0.0, ground=None,
+                 arena_radius=14.0):
         self.parent = parent
         self.base = base            # hauteur du sol de l'arène (arène perchée)
         self.centre, self.radius, self.kind = Vec3(centre[0], 0, centre[1]), radius, kind
+        self.arena_radius = arena_radius
+        self.ground = ground        # hauteur du sol en (x, z) (le quartier n'est pas plat)
         self.rng = rng
         self.type_color = type_color
         self._acc = {}
         self._warm = 0.0            # à l'arrivée de la caméra : la météo lente est déjà installée
         self._active = False
+        self._focus = self.centre
         self._bolt = rng.uniform(2, 5)
         self.wind = Vec3(math.cos(rng.uniform(0, math.tau)), 0, math.sin(rng.uniform(0, math.tau)))
 
@@ -852,41 +858,58 @@ class ArenaWeather:
         return n
 
     def _spot(self, extra=0.0):
-        a, r = self.rng.uniform(0, math.tau), math.sqrt(self.rng.random()) * (self.radius + extra)
-        return self.centre.x + math.sin(a) * r, self.centre.z + math.cos(a) * r
+        """Point au hasard autour de la caméra, dans le quartier de l'arène."""
+        f, R = self._focus, self.radius + max(0.0, extra)
+        for _ in range(4):
+            a, r = self.rng.uniform(0, math.tau), math.sqrt(self.rng.random()) * (self.LOCAL + extra)
+            x, z = f.x + math.sin(a) * r, f.z + math.cos(a) * r
+            if (x - self.centre.x) ** 2 + (z - self.centre.z) ** 2 < R * R:
+                return x, z
+        return x, z
 
-    def update(self, dt, focus=None, view=70):
+    def _y(self, x, z):
+        return self.ground(x, z) if self.ground is not None else self.base
+
+    def update(self, dt, focus=None, owned=True, view=70):
         P = PARTICLES
-        if P is None or (focus is not None and (Vec3(focus.x, 0, focus.z) - self.centre).length() > self.radius + view):
+        if P is None or not owned or focus is None:
             self._active = False
             return
+        f = Vec3(focus.x, 0, focus.z)
+        d = (f - self.centre).length()
+        if d > self.radius + 8:
+            self._active = False
+            return
+        if d > self.radius - 4:                 # caméra au bord du quartier : on émet plutôt vers l'intérieur
+            f = self.centre + (f - self.centre).normalized() * (self.radius - 4)
+        self._focus = f
         if not self._active:
             self._active, self._warm = True, 3.0
         getattr(self, '_' + self.kind)(P, dt)
         self._warm = 0.0
 
     def _pluie(self, P, dt, heavy=1.0):
-        rng, y0 = self.rng, self.base
+        rng = self.rng
         wx, wz = self.wind.x * 3 * heavy, self.wind.z * 3 * heavy
         for _ in range(self._rate('drop', 340 * heavy, dt)):
             x, z = self._spot(6)
             h = rng.uniform(9, 14)
-            P.emit((x - wx * .5, y0 + h, z - wz * .5), (.5, .58, .7), size=.15, life=h / 26, vel=(wx, -26, wz),
+            P.emit((x - wx * .5, self._y(x, z) + h, z - wz * .5), (.5, .58, .7), size=.15, life=h / 26, vel=(wx, -26, wz),
                    tex='streak', blend='alpha', mode='stretch', stretch=.06, alpha=.85, fade=.2)
         for _ in range(self._rate('cloud', .9, dt)):                   # ombre des nuages : l'arène s'assombrit
             x, z = self._spot(-6)
-            P.emit((x, y0 + .25, z), (.1, .12, .18), size=rng.uniform(20, 26), life=5, grow=1.1, tex='smoke',
+            P.emit((x, self._y(x, z) + .25, z), (.1, .12, .18), size=rng.uniform(20, 26), life=5, grow=1.1, tex='smoke',
                    blend='alpha', mode='flat', alpha=.26 * heavy, fade=1.0)
         for _ in range(self._rate('splash', 110 * heavy, dt)):
             x, z = self._spot(4)
-            P.emit((x, y0 + .2, z), (.88, .94, 1), size=.25, life=.45, grow=5, tex='ring', blend='alpha', mode='flat',
+            P.emit((x, self._y(x, z) + .2, z), (.88, .94, 1), size=.25, life=.45, grow=5, tex='ring', blend='alpha', mode='flat',
                    alpha=.7, rot=0)
             for _ in range(2):
-                P.emit((x, y0 + .2, z), (.9, .95, 1), size=.14, life=.3, vel=(rnd(1.4), ru(1.8, 3), rnd(1.4)),
+                P.emit((x, self._y(x, z) + .2, z), (.9, .95, 1), size=.14, life=.3, vel=(rnd(1.4), ru(1.8, 3), rnd(1.4)),
                        gravity=14, tex='drop', blend='alpha', mode='stretch', stretch=.03, alpha=.8)
         for _ in range(self._rate('mist', 2.5, dt)):                   # brume basse
             x, z = self._spot()
-            P.emit((x, y0 + .6, z), (.78, .84, .9), size=rng.uniform(6, 9), life=4, vel=(wx * .2, 0, wz * .2),
+            P.emit((x, self._y(x, z) + .6, z), (.78, .84, .9), size=rng.uniform(6, 9), life=4, vel=(wx * .2, 0, wz * .2),
                    grow=1.3, tex='smoke', blend='alpha', alpha=.2)
 
     def _orage(self, P, dt):
@@ -895,69 +918,70 @@ class ArenaWeather:
         if self._bolt <= 0:
             self._bolt = self.rng.uniform(2.5, 6)
             x, z = self._spot(-3)
-            lightning(self.parent, Vec3(x, self.base, z), (1, .95, .4), height=30)
+            lightning(self.parent, Vec3(x, self._y(x, z), z), (1, .95, .4), height=30)
 
     def _sable(self, P, dt):
-        rng, y0, w = self.rng, self.base, self.wind
+        rng, w = self.rng, self.wind
         for _ in range(self._rate('cloud', 12, dt)):                    # nappes de poussière qui défilent
             x, z = self._spot(6)
             sp = rng.uniform(5, 8)
-            P.emit((x - w.x * 6, y0 + rng.uniform(1, 4.5), z - w.z * 6), (.97, .86, .64), col2=(.9, .78, .58),
+            P.emit((x - w.x * 6, self._y(x, z) + rng.uniform(1, 4.5), z - w.z * 6), (.97, .86, .64), col2=(.9, .78, .58),
                    size=rng.uniform(4, 7), life=3, vel=(w.x * sp, rng.uniform(-.2, .3), w.z * sp), grow=1.6,
                    tex='smoke', blend='alpha', spin=rnd(.6), alpha=.55, fade=1.0)
         for _ in range(self._rate('shadow', .8, dt)):                  # la poussière voile le soleil
             x, z = self._spot(-6)
-            P.emit((x, y0 + .25, z), (.35, .22, .1), size=rng.uniform(18, 24), life=5, grow=1.1, tex='smoke',
+            P.emit((x, self._y(x, z) + .25, z), (.35, .22, .1), size=rng.uniform(18, 24), life=5, grow=1.1, tex='smoke',
                    blend='alpha', mode='flat', alpha=.24, fade=1.0)
         for _ in range(self._rate('grain', 140, dt)):                   # grains de sable en traits
             x, z = self._spot(4)
             sp = rng.uniform(10, 15)
-            P.emit((x, y0 + rng.uniform(.2, 3), z), (1, .93, .74), size=.14, life=.5,
+            P.emit((x, self._y(x, z) + rng.uniform(.2, 3), z), (1, .93, .74), size=.14, life=.5,
                    vel=(w.x * sp + rnd(1), rnd(.6), w.z * sp + rnd(1)), tex='streak', blend='alpha', mode='stretch',
                    stretch=.05, alpha=.8)
         for _ in range(self._rate('swirl', 1.2, dt)):                   # petit tourbillon de poussière
             x, z = self._spot()
             for k in range(6):
                 a = k * math.tau / 6
-                P.emit((x + math.sin(a) * .8, y0 + .3 + k * .35, z + math.cos(a) * .8), (.84, .72, .52), size=1.4,
+                P.emit((x + math.sin(a) * .8, self._y(x, z) + .3 + k * .35, z + math.cos(a) * .8), (.84, .72, .52), size=1.4,
                        life=1.6, vel=(math.cos(a) * 2 + w.x * 2, .9, -math.sin(a) * 2 + w.z * 2), grow=1.8,
                        tex='smoke', blend='alpha', alpha=.3, spin=4)
 
     def _pollen(self, P, dt):
-        rng, y0 = self.rng, self.base
+        rng = self.rng
         for _ in range(self._rate('mote', 26, dt)):
             x, z = self._spot(4)
-            P.emit((x, y0 + rng.uniform(.5, 5), z), (1, .95, .5), col2=(.75, 1, .45), size=rng.uniform(.2, .38),
+            P.emit((x, self._y(x, z) + rng.uniform(.5, 5), z), (1, .95, .5), col2=(.75, 1, .45), size=rng.uniform(.2, .38),
                    life=rng.uniform(3, 5), vel=(rnd(.4) + self.wind.x * .3, rnd(.25), rnd(.4) + self.wind.z * .3),
                    alpha=.9, fade=.7)
         for _ in range(self._rate('petal', 10, dt)):
             x, z = self._spot(5)
             col = rng.choice(((1, .7, .82), (1, .82, .9), (.55, .85, .35), (1, .95, .7)))
-            P.emit((x, y0 + rng.uniform(3, 7), z), col, size=rng.uniform(.4, .6), life=6,
+            P.emit((x, self._y(x, z) + rng.uniform(3, 7), z), col, size=rng.uniform(.4, .6), life=6,
                    vel=(self.wind.x * .8 + rnd(.3), -1.1, self.wind.z * .8 + rnd(.3)), drag=.1, tex='leaf',
                    blend='alpha', spin=rnd(4), alpha=1, fade=.4)
         for _ in range(self._rate('ray', .5, dt)):                      # rais de lumière très doux
             x, z = self._spot(-2)
-            P.emit((x, y0 + 5, z), (1, .95, .7), size=1.6, life=5, vel=(0, .01, 0), tex='streak', mode='stretch',
+            P.emit((x, self._y(x, z) + 5, z), (1, .95, .7), size=1.6, life=5, vel=(0, .01, 0), tex='streak', mode='stretch',
                    stretch=0, alpha=.07, grow=1.2)
 
     def _soleil(self, P, dt):
-        rng, y0 = self.rng, self.base
+        rng = self.rng
         for _ in range(self._rate('ember', 40, dt)):
             x, z = self._spot(6)
-            P.emit((x, y0 + .2, z), (1, .8, .35), col2=(1, .25, .05), size=rng.uniform(.16, .28),
+            P.emit((x, self._y(x, z) + .2, z), (1, .8, .35), col2=(1, .25, .05), size=rng.uniform(.16, .28),
                    life=rng.uniform(1.8, 3), vel=(rnd(.8), rng.uniform(1.5, 3.5), rnd(.8)), gravity=-.6, drag=.6,
                    mode='stretch', stretch=.05, fade=.8)
         for _ in range(self._rate('ash', 8, dt)):
             x, z = self._spot(6)
-            P.emit((x, y0 + rng.uniform(5, 9), z), (.35, .33, .32), size=rng.uniform(.2, .32), life=5,
+            P.emit((x, self._y(x, z) + rng.uniform(5, 9), z), (.35, .33, .32), size=rng.uniform(.2, .32), life=5,
                    vel=(rnd(.4), -.7, rnd(.4)), tex='leaf', blend='alpha', spin=rnd(3), alpha=.8)
         for _ in range(self._rate('haze', 1.5, dt)):                    # air chaud qui tremble
             x, z = self._spot()
-            P.emit((x, y0 + .8, z), (1, .55, .25), size=rng.uniform(4, 6), life=2.5, vel=(0, .6, 0), grow=1.3,
+            P.emit((x, self._y(x, z) + .8, z), (1, .55, .25), size=rng.uniform(4, 6), life=2.5, vel=(0, .6, 0), grow=1.3,
                    tex='smoke', alpha=.07)
         for _ in range(self._rate('fume', 1.2, dt)):                    # fumerolles au bord de l'arène
             a = rng.uniform(0, math.tau)
-            x, z = self.centre.x + math.sin(a) * (self.radius + 2.6), self.centre.z + math.cos(a) * (self.radius + 2.6)
-            smoke(P, (x, y0 + .3, z), (rnd(.3), 1.2, rnd(.3)), s=1.6, life=3, alpha=.25)
-            P.emit((x, y0 + .2, z), (1, .5, .1), size=1.6, life=1, alpha=.4)
+            ar = self.arena_radius + 2.6
+            x, z = self.centre.x + math.sin(a) * ar, self.centre.z + math.cos(a) * ar
+            smoke(P, (x, self._y(x, z) + .3, z), (rnd(.3), 1.2, rnd(.3)), s=1.6, life=3, alpha=.25)
+            P.emit((x, self._y(x, z) + .2, z), (1, .5, .1), size=1.6, life=1, alpha=.4)

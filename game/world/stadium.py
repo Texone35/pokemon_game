@@ -1443,7 +1443,7 @@ class Stadium:
             buff = camp.get('buff')
             # sol et bordure du camp au thème de son gardien
             ground = {'braise': ((.28, .24, .22), (.34, .28, .25)), 'flux': ((.62, .62, .5), (.7, .68, .56)),
-                      'bastion': ((.3, .42, .2), (.36, .46, .24))}.get(buff, ((.5, .5, .3), (.56, .5, .34)))
+                      'seve': ((.3, .42, .2), (.36, .46, .24))}.get(buff, ((.5, .5, .3), (.56, .5, .34)))
             b.add('cyl24', (x0, .02, z0), (11, .04, 10), col=color.rgb(*ground[0]))
             b.add('cyl24', (x0, .03, z0), (8, .04, 7.4), col=color.rgb(*ground[1]))
             col = C.BUFFS[buff]['color'] if buff else color.rgb(.85, .85, .85)
@@ -1464,8 +1464,8 @@ class Stadium:
                     elif i % 3 == 0:
                         self._crystals(b, x, z, .6)
                 else:
-                    self._rock(b, x, z, rng.uniform(.45, .7), moss=.9 if buff == 'bastion' else .5)
-                    if buff == 'bastion' and i % 2:
+                    self._rock(b, x, z, rng.uniform(.45, .7), moss=.9 if buff == 'seve' else .5)
+                    if buff == 'seve' and i % 2:
                         self._tree(b, x + .3, z + .3, rng.uniform(.55, .7), 'fern', biomes.PLANTE)
             glow.add('ring_97', (x0, .07, z0), (3.2, .04, 3.2), col=col)
             # icône flottante au-dessus du camp, comme sur la carte : le type du Pokémon qui y vit
@@ -1954,6 +1954,51 @@ class Stadium:
             f = d.reshape(self.size, self.size)
             self.fields[(key, team)] = f
         return f
+
+    def path(self, a, b, team=None, radius=.6):
+        """Chemin (liste de points) de a vers b pour un déplacement au clic : tout droit si la voie est
+        libre, sinon en contournant les murs (plus court chemin sur la grille, puis lissé). Si b est
+        dans un mur, on va au point praticable le plus proche."""
+        a, b = Vec3(a.x, 0, a.z), Vec3(b.x, 0, b.z)
+        if not self.blocked(b.x, b.z, radius) and self.free_line(a, b, radius):
+            return [b]
+        walk = self.team_walk[team]
+        gi, gj = self._nearest_walkable(*self.cell_of(b.x, b.z), walk)
+        si, sj = self._nearest_walkable(*self.cell_of(a.x, a.z), walk)
+        goal = self.cell_centre(gi, gj)
+        if self.blocked(b.x, b.z, radius):
+            b = goal
+        limit = max(60.0, 3.0 * (goal - a).length())     # on ne cherche pas au bout de la carte
+        d = dijkstra(self.graphs[team], directed=False, indices=gi * self.size + gj, limit=limit)
+        f = d.reshape(self.size, self.size)
+        if not np.isfinite(f[si, sj]):
+            return [self.reach(a, b)]                    # inaccessible : on va aussi loin que possible
+        cells, i, j = [], si, sj
+        for _ in range(2000):                            # on descend le champ de distances
+            best = (f[i, j], i, j)
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    x, y = i + di, j + dj
+                    if 0 <= x < self.size and 0 <= y < self.size and f[x, y] < best[0]:
+                        best = (f[x, y], x, y)
+            if best[1:] == (i, j):
+                break
+            i, j = best[1], best[2]
+            cells.append(self.cell_centre(i, j))
+        pts, cur = [], a
+        k = 0
+        while k < len(cells):                            # lissage : on saute les points en ligne droite
+            far = k
+            for m in range(len(cells) - 1, k, -1):
+                if self.free_line(cur, cells[m], radius):
+                    far = m
+                    break
+            cur = cells[far]
+            pts.append(cur)
+            k = far + 1
+        if not pts or (pts[-1] - b).length() > .5:
+            pts.append(b)
+        return pts
 
     def direction(self, key, target, pos, team=None):
         """Direction (Vec3 normalisée) à suivre pour aller de pos vers la destination `key`."""
