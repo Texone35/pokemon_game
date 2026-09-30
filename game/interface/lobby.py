@@ -46,11 +46,12 @@ BG_TOP, BG_BOTTOM = np.array([9, 13, 36]), np.array([46, 32, 92])
 CAM_POS, CAM_LOOK = Vec3(0, 2.1, -11), Vec3(0, 1.25, 0)
 MAIN_POS = Vec3(-1.2, 0, 2.5)        # socle du Pokémon choisi (salon)
 OTHER_POS = Vec3(-6.2, 0, 4.5)       # socle du Pokémon de l'autre joueur
-CAROUSEL = Vec3(3.6, 0, 6.5)         # carrousel de l'accueil
-CAROUSEL_R = 3.4
+CAROUSEL = Vec3(4.4, 0, 10.5)         # carrousel de l'accueil
+CAROUSEL_R = 6.6                     # 16 Pokémon sur le plateau
+FRONT = CAROUSEL - Vec3(0, 0, CAROUSEL_R)            # place d'honneur du carrousel (face à la caméra)
 
 MOVE_KIND = {'basic': 'attaque de base', 'rush': 'ruée', 'strike': 'impact de zone', 'homing': 'tête chercheuse',
-             'spin': 'onde de choc'}
+             'spin': 'onde de choc', 'beam': 'rayon', 'blink': 'téléportation', 'heal': 'soin'}
 SPECIAL_KIND = {'beam': 'rayon', 'wave': 'onde', 'zone': 'zone', 'nova': 'anneau', 'charge': 'charge', 'heal': 'soin'}
 
 
@@ -232,9 +233,9 @@ class Carousel:
         for p in self.slots:
             p.creature.animate(dt)
             p.creature.rotation_y = 180 - self.angle           # toujours tournés vers la caméra
-            d = (p.root.world_position - CAM_POS).length()
-            k = min(1, max(0, (CAROUSEL.z - CAM_POS.z + CAROUSEL_R - d) / (2 * CAROUSEL_R)))
-            p.root.scale = .5 + .4 * k * k                     # celui de devant est plus grand
+            d = (p.root.world_position - FRONT).length()          # distance à la place d'honneur
+            k = max(0, 1 - d / (CAROUSEL_R * 1.1))
+            p.root.scale = .36 + .52 * k ** 3                  # celui de devant est plus grand
             p.ring.scale = 1 + .08 * k
             if d < bd:
                 best, bd = p, d
@@ -281,6 +282,20 @@ def _stats(species):
     return out
 
 
+def _zones(ptype):
+    """Terrains favorables et défavorables pour un type : (« Arène Feu, Rivière », « Arène Eau »)."""
+    good, bad = [], []
+    for zone, name in C.ZONE_NAMES.items():
+        eff = C.zone_effect(zone, ptype)
+        gain = eff.get('dmg', 0) + eff.get('speed', 0) - eff.get('taken', 0)
+        short = name.replace('Arène ', '')
+        if gain > 0:
+            good.append(short)
+        elif gain < 0:
+            bad.append(short)
+    return ', '.join(good), ', '.join(bad)
+
+
 def _move_kind(species, mv):
     if mv['kind'] == 'special':
         return SPECIAL_KIND.get(C.SPECIES[species]['special']['kind'], 'capacité spéciale')
@@ -301,6 +316,7 @@ class Lobby(Entity):
         self.ping_ms = None
         self._ping_t = 0.0
         self._starting = False
+        self.ai = getattr(game, 'ai_level', 'facile')    # niveau des Pokémon de l'ordinateur (choisi par l'hôte)
         self.cards = None
         self._info_species = None
         # scène 3D : fond, sol, estrade, socles, carrousel
@@ -459,7 +475,7 @@ class Lobby(Entity):
         # cartes de choix
         self.cards = {}
         n = len(C.PLAYABLE)
-        w, h, gap = .15, .165, .016
+        w, h, gap = (.15, .165, .016) if n <= 8 else (.098, .13, .008)     # 16 Pokémon : cartes compactes
         for i, sp in enumerate(C.PLAYABLE):
             self.cards[sp] = self._card(ui, sp, ((i - (n - 1) / 2) * (w + gap), -.33), w, h)
         # actions
@@ -468,6 +484,9 @@ class Lobby(Entity):
         self.ready_btn = Btn(ui, label, (.66, -.455), self.toggle_ready, w=.3, h=.06, size=1.05,
                              col=color.rgba(.12, .45, .24, .97), accent=OK_GREEN)
         self.status = Text(parent=ui, text='', position=(0, -.455), origin=(0, 0), scale=.85, color=DIM, **F_SEMI)
+        self.ai_btn = Btn(ui, '', (.35, .43), self.toggle_ai, w=.44, h=.062, size=.85, align='left',
+                          col=color.rgba(.14, .14, .28, .95))
+        self._refresh_ai()
         self.ping_text = Text(parent=ui, text='', position=(.83, .44), origin=(.5, 0), scale=.8, color=DIM,
                               **F_SEMI)
         self._refresh_room()
@@ -488,8 +507,10 @@ class Lobby(Entity):
         Entity(parent=card, model=_quad(w - .018, .006, .003), scale=(w - .018, .006), y=h * .15 - h * .3 + .003,
                color=t['color'], z=-.006)
         self.portraits.icon(card, sp, scale=h * .62, y=h * .15, z=-.01)
-        Text(parent=card, text=d['name'], y=-h * .27, origin=(0, 0), scale=.88, z=-.01, **F_BOLD)
-        Text(parent=card, text=t['name'], y=-h * .4, origin=(0, 0), scale=.65, z=-.01, color=t['light'], **F_SEMI)
+        k = min(1.0, w / .15)
+        Text(parent=card, text=d['name'], y=-h * .27, origin=(0, 0), scale=.88 * k ** .6, z=-.01, **F_BOLD)
+        Text(parent=card, text=t['name'], y=-h * .4, origin=(0, 0), scale=.65 * k ** .5, z=-.01, color=t['light'],
+             **F_SEMI)
         card.tag = None
         return card
 
@@ -504,7 +525,18 @@ class Lobby(Entity):
         chip(info, t['name'].upper(), (x0 + .06, .195), t['color'], w=.12, size=.78)
         Text(parent=info, text=C.PLAYABLE_ROLE[sp], position=(x0, .145), origin=(-.5, 0), scale=.82, color=DIM,
              **F_SEMI)
-        y = .085
+        evo = '  >  '.join(f"{C.SPECIES[f]['name']} (Nv {lvl})" for lvl, f in C.EVOLUTIONS.get(sp, ()))
+        if evo:
+            Text(parent=info, text='Évolue : ' + evo, position=(x0, .114), origin=(-.5, 0), scale=.72,
+                 color=t['light'], **F_SEMI)
+        if sp in C.TRAITS:
+            name, desc = C.TRAITS[sp]
+            Text(parent=info, text=f'Talent  {name} : {desc}', position=(x0, .084), origin=(-.5, 0), scale=.72,
+                 color=GOLD, **F_SEMI)
+        good, bad = _zones(d['type'])
+        Text(parent=info, text=f'Terrain  <green>+ {good or "-"}   <red>- {bad or "-"}', position=(x0, .056),
+             origin=(-.5, 0), scale=.72, color=DIM, **F_SEMI)
+        y = .022
         for name, v in _stats(sp):
             Text(parent=info, text=name, position=(x0, y), origin=(-.5, 0), scale=.78, **F_SEMI)
             bw = .38
@@ -512,20 +544,20 @@ class Lobby(Entity):
                    color=color.rgba(1, 1, 1, .1))
             Entity(parent=info, model=_quad(bw * v, .014, .007), scale=(bw * v, .014), origin=(-.5, 0),
                    position=(x0 + .14, y, -.001), color=t['light'])
-            y -= .037
+            y -= .03
         y -= .012
         Text(parent=info, text='ATTAQUES', position=(x0, y), origin=(-.5, 0), scale=.85, color=GOLD, **F_BOLD)
-        y -= .042
-        for mv in C.MOVESETS[sp]:
+        y -= .04
+        for mv in C.moves_for(sp, sp):
             k = mv['key'].upper()
             Entity(parent=info, model=_quad(.032, .032, .007), scale=(.032, .032), position=(x0 + .016, y),
                    color=GOLD)
             Text(parent=info, text=k, position=(x0 + .016, y, -.001), origin=(0, 0), scale=.85,
                  color=color.rgb(.12, .1, .05), **F_BOLD)
             Text(parent=info, text=mv['name'], position=(x0 + .045, y), origin=(-.5, 0), scale=.85, **F_SEMI)
-            Text(parent=info, text=_move_kind(sp, mv), position=(.265, y), origin=(.5, 0), scale=.72, color=DIM,
-                 **F_SEMI)
-            y -= .04
+            kind = _move_kind(sp, mv) + (f"  -  Nv {mv['unlock']}" if mv.get('locked') else '')
+            Text(parent=info, text=kind, position=(.265, y), origin=(.5, 0), scale=.72, color=DIM, **F_SEMI)
+            y -= .035
 
     # ================================================================ actions
     def start_solo(self):
@@ -580,13 +612,36 @@ class Lobby(Entity):
 
     def toggle_ready(self):
         if self.mode == 'solo':
-            self._launch([self.pick['me']], 0, 'solo')
+            self._launch([self.pick['me']], 0, 'solo', random.randrange(1 << 30))
             return
         self.ready['me'] = not self.ready['me']
         if self.mode == 'guest' and self.link:
             self.link.send({'t': 'ready', 'v': self.ready['me']})
         self._sync()
         self._refresh_room()
+
+    def toggle_ai(self):
+        if self.mode == 'guest':
+            return                                   # c'est l'hôte qui choisit
+        self.ai = 'expert' if self.ai == 'facile' else 'facile'
+        self.game.ai_level = self.ai                 # gardé pour la prochaine partie
+        self._refresh_ai()
+        self._sync()
+
+    def _refresh_ai(self):
+        btn = getattr(self, 'ai_btn', None)
+        if btn is None:
+            return
+        expert = self.ai == 'expert'
+        btn.set(f"IA : {'EXPERT' if expert else 'FACILE'}", color.rgba(.4, .14, .16, .95) if expert
+                else color.rgba(.14, .14, .28, .95))
+        tip = ('Réfléchit, se coordonne et esquive' if expert else 'Pour découvrir le jeu')
+        if self.mode == 'guest':
+            tip = "Choisi par l'hôte"
+        if getattr(btn, 'tip', None) is None:
+            btn.tip = Text(parent=btn, text='', position=(.205, 0, -.01), origin=(.5, 0), scale=.68, color=DIM,
+                           **F_SEMI)
+        btn.tip.text = tip
 
     def back(self):
         self._close_net(notify=True)
@@ -616,21 +671,23 @@ class Lobby(Entity):
         if self.mode == 'host' and self.link is not None and self.link.joined and not self.link.closed:
             self.link.send({'t': 'lobby', 'host': {'sp': self.pick['me'], 'ready': self.ready['me']},
                             'guest': {'sp': self.pick['other'], 'ready': self.ready['other']},
-                            'ping': self.ping_ms})
+                            'ping': self.ping_ms, 'ai': self.ai})
             if self.ready['me'] and self.ready['other'] and self.pick['other']:
                 self._host_start()
 
     def _host_start(self):
         humans = [self.pick['me'], self.pick['other']]
         world = {'tree_spacing': C.QUALITY['tree_spacing'], 'relief': C.QUALITY['relief']}
-        self.link.send({'t': 'start', 'humans': humans, 'map': world})
-        self._launch(humans, 0, 'host')
+        seed = random.randrange(1 << 30)            # même tirage des Pokémon de l'IA sur les deux PC
+        self.link.send({'t': 'start', 'humans': humans, 'map': world, 'seed': seed})
+        self._launch(humans, 0, 'host', seed)
 
-    def _launch(self, humans, local, role):
+    def _launch(self, humans, local, role, seed=0):
         if self._starting:
             return
         self._starting = True
-        setup = {'humans': humans, 'local': local, 'role': role, 'host': self.host, 'link': self.link}
+        setup = {'humans': humans, 'local': local, 'role': role, 'host': self.host, 'link': self.link, 'seed': seed,
+                 'ai': self.ai}
         self.host = self.guest = self.link = None      # la partie prend la main sur la connexion
         self.game.start_match(setup)
 
@@ -751,6 +808,9 @@ class Lobby(Entity):
                 self.ready['other'] = bool(hs.get('ready'))
                 self.ready['me'] = bool(gs.get('ready'))
                 self.ping_ms = msg.get('ping')
+                if msg.get('ai') in ('facile', 'expert'):
+                    self.ai = msg['ai']
+                    self._refresh_ai()
                 self._refresh_room()
             elif t == 'start' and self.mode == 'guest':
                 humans = [s for s in msg.get('humans', ()) if s in C.PLAYABLE]
@@ -759,7 +819,8 @@ class Lobby(Entity):
                 for k, v in (msg.get('map') or {}).items():
                     if k in ('tree_spacing', 'relief') and isinstance(v, (int, float)):
                         C.QUALITY[k] = float(v)     # même jungle et même relief que l'hôte
-                self._launch(humans, 1, 'client')
+                seed = msg.get('seed', 0)
+                self._launch(humans, 1, 'client', seed if isinstance(seed, int) else 0)
                 return
 
     # ================================================================ affichage

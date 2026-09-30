@@ -89,6 +89,10 @@ class Banner(Entity):
         self.text.text = message
         self.text.color = text_color
         self.text.scale = 2.6 if big else 1.7
+        w = self.text.width * self.text.scale_x          # message trop long : on réduit pour qu'il tienne
+        limit = camera.aspect_ratio * .95
+        if w > limit:
+            self.text.scale *= limit / w
         self.bg.scale_y = .14 if big else .09
         self.enabled = True
         self.timer = duration if duration else float('inf')   # None = reste affiché
@@ -118,17 +122,30 @@ class MoveSlot(Entity):
     """Case d'attaque avec touche, nom et voile de recharge."""
     W, H = .12, .085
 
-    def __init__(self, key_label, name, **kwargs):
+    def __init__(self, key_label, name, locked=None, **kwargs):
+        """locked : niveau qui débloque l'attaque (case grisée avec un cadenas), ou None."""
         kwargs.setdefault('parent', camera.ui)
         super().__init__(**kwargs)
+        self.locked = locked
         Entity(parent=self, model='quad', color=color.rgba(.05, .05, .08, .8), scale=(self.W, self.H))
-        Text(parent=self, text=key_label, origin=(0, 0), y=.013, z=-.01, scale=1.5 if len(key_label) == 1 else 1,
-             color=color.rgb(1, .92, .35))
-        Text(parent=self, text=name, origin=(0, 0), y=-.025, z=-.01, scale=.62, color=color.rgb(.92, .92, .92))
         self.shade = Entity(parent=self, model='quad', color=color.rgba(0, 0, 0, .65), origin=(0, -.5),
                             position=(0, -self.H / 2, -.02), scale=(self.W, 0))
+        if not locked:
+            Text(parent=self, text=key_label, origin=(0, 0), y=.013, z=-.01, scale=1.5 if len(key_label) == 1 else 1,
+                 color=color.rgb(1, .92, .35))
+            Text(parent=self, text=name, origin=(0, 0), y=-.025, z=-.01, scale=.62, color=color.rgb(.92, .92, .92))
+            return
+        # attaque pas encore débloquée : cadenas, nom grisé et niveau d'évolution requis
+        lock = Entity(parent=self, position=(0, .02, -.01))
+        Entity(parent=lock, model='circle', color=color.rgb(.8, .76, .6), scale=.02, y=.008)
+        Entity(parent=lock, model='circle', color=color.rgba(.05, .05, .08, 1), scale=.011, y=.008, z=-.001)
+        Entity(parent=lock, model='quad', color=color.rgb(.8, .76, .6), scale=(.024, .016), z=-.002)
+        Text(parent=self, text=name, origin=(0, 0), y=-.01, z=-.01, scale=.58, color=color.rgb(.55, .56, .62))
+        Text(parent=self, text=f'Nv {locked}', origin=(0, 0), y=-.03, z=-.01, scale=.72, color=color.rgb(1, .9, .55))
 
     def set_ratio(self, ratio):
+        if self.locked:
+            return
         self.shade.scale_y = self.H * max(0, min(1, ratio))
 
 

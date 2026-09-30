@@ -29,7 +29,13 @@ from game.interface.widgets import Feed, MoveSlot, floating_text, hp_color
 from game.pokemon.units import ALLY_BAR, BotBrain, NeutralBrain, PlayerBrain, RemotePlayerBrain, Unit
 
 TEAM_KEYS = ('rouge', 'bleu')
+# couleurs de la mini-carte par biome (ordre de biomes.KEYS) : sol praticable et massifs
+MAP_GROUND = [(76, 140, 70), (150, 128, 88), (70, 140, 58), (92, 146, 76), (86, 150, 112), (84, 70, 62)]
+MAP_MASSIF = [(22, 52, 24), (112, 84, 56), (18, 66, 22), (30, 64, 30), (24, 78, 66), (46, 32, 30)]
 NEUTRAL_RING = color.rgb(.85, .85, .85)
+STAT_KEYS = ('ko', 'deaths', 'assists', 'dmg', 'taken', 'heal', 'caps', 'points')
+ASSIST_TIME = 10.0              # un coup porté moins de 10 s avant un K.O. compte comme une aide
+RESULTS_DELAY = 2.5             # secondes entre la fin de la partie et la page des résultats
 
 
 def v3(p):
@@ -45,6 +51,7 @@ class Match(Entity):
         self.game = game
         self.role = setup['role']
         self.authority = self.role != 'client'   # l'hôte (ou le solo) décide de tout
+        self.ai_level = setup.get('ai', 'facile')   # 'facile' (BotBrain) ou 'expert' (ai.ExpertBrain)
         self.net = None
         self.root = Entity(parent=self)
         self.stadium = Stadium(self.root)
@@ -52,6 +59,7 @@ class Match(Entity):
         fx.PARTICLES = self.particles = fx.Particles(self.root)
         self.projectiles, self.hazards = [], []
         self.pending_hits = []          # coups au contact en cours d'élan
+        self._los = {}                  # lignes de vue récentes entre Pokémon (voir can_see)
         self.time = 0.0
         self.score = {'rouge': 0.0, 'bleu': 0.0}
         self.state = 'play'
@@ -65,12 +73,12 @@ class Match(Entity):
         self.humans = []
         local = setup['local']
         for team in TEAM_KEYS:
-            for i, entry in enumerate(C.build_roster(team, setup['humans'])):
+            for i, entry in enumerate(C.build_roster(team, setup['humans'], setup.get('seed'))):
                 human = entry.get('human')
                 u = Unit(self, entry['species'], team, self._spawn_point(team, i), role=entry['role'],
                          human=human, local=human is not None and human == local)
                 if human is None:
-                    u.brain = BotBrain(u, self)
+                    u.brain = self.bot_brain(u)
                 elif u.local:
                     u.brain = PlayerBrain(u, self)
                     self.player = u
@@ -81,6 +89,10 @@ class Match(Entity):
                 if human is not None:
                     self.humans.append(u)
         self.remote = next((h for h in self.humans if not h.local), None)
+        self.auras = {t: [u for u in self.team_units[t] if u.trait in ('Plus', 'Écran Neige')] for t in TEAM_KEYS}
+        self._reset_stats()
+        self.results = None             # page de fin de partie
+        self._end_t = 0.0
         self._build_camps()
         self._build_bosses()
         if self.role == 'host':
@@ -104,11 +116,27 @@ class Match(Entity):
         self._place_camera(1)
         self.game.banner.show('Dominez les arènes ! Capturez-les en restant dans leur cercle.', 4)
 
+    def bot_brain(self, u):
+        """Cerveau d'un Pokémon contrôlé par l'ordinateur, selon le niveau choisi dans le salon."""
+        if self.ai_level == 'expert':
+            from game.pokemon.ai import ExpertBrain
+            return ExpertBrain(u, self)
+        return BotBrain(u, self)
+
     def _add_unit(self, u):
         u.uid = len(self.units)           # même numéro sur les deux PC (même ordre de création)
         self.units.append(u)
 
     # ================================================================ construction
+    def _reset_stats(self):
+        """Statistiques de chaque Pokémon des équipes, pour la page de fin de partie."""
+        self.stats = {u.uid: dict.fromkeys(STAT_KEYS, 0) for u in self.units if u.team}
+        self._hitters = {}              # victime -> {attaquant: moment du dernier coup} (aides)
+
+    def add_stat(self, u, key, value):
+        if u is not None and u.team:
+            self.stats[u.uid][key] += value
+
     def _spawn_point(self, team, i):
         bx, bz = C.TEAMS[team]['base']
         a = math.radians(i * 72)
@@ -119,21 +147,22 @@ class Match(Entity):
         R = C.ARENA_RADIUS
         for cfg in C.ARENAS:
             p = v3(cfg['pos'])
+            y0 = self.stadium.arena_floor(cfg['key'])          # arène perchée sur un plateau
             t = C.TYPES[cfg['type']]
             ring = MeshBuilder().add('ring_thin', (0, 0, 0), (1, 1, 1), col=color.white).entity(
-                parent=self.root, emissive=1.0, position=p + Vec3(0, .15, 0), scale=(R * 2, .25, R * 2),
+                parent=self.root, emissive=1.0, position=p + Vec3(0, y0 + .15, 0), scale=(R * 2, .25, R * 2),
                 color=NEUTRAL_RING)
             crystal = MeshBuilder()
             crystal.add('cone4', (0, .6, 0), (1.2, 1.2, 1.2), col=color.white)
             crystal.add('cone4', (0, -.6, 0), (1.2, 1.2, 1.2), rot=(180, 0, 0), col=color.white)
-            crystal = crystal.entity(parent=self.root, emissive=.7, position=p + Vec3(0, 6, 0), color=NEUTRAL_RING)
+            crystal = crystal.entity(parent=self.root, emissive=.7, position=p + Vec3(0, y0 + 6, 0), color=NEUTRAL_RING)
             emb = MeshBuilder()
             add_emblem(emb, cfg['type'], (0, 0, 0), 1.6)
-            emblem = emb.entity(parent=self.root, emissive=.6, position=p + Vec3(0, 9.5, 0))
-            label = Text(parent=self.root, text=cfg['name'].upper(), position=p + Vec3(0, 13, 0), billboard=True,
+            emblem = emb.entity(parent=self.root, emissive=.6, position=p + Vec3(0, y0 + 9.5, 0))
+            label = Text(parent=self.root, text=cfg['name'].upper(), position=p + Vec3(0, y0 + 13, 0), billboard=True,
                          scale=26, origin=(0, 0), color=t['light'])
-            weather = ArenaWeather(self.root, cfg['pos'], R, cfg['weather'], t['color'])
-            self.arenas.append({'key': cfg['key'], 'name': cfg['name'], 'type': cfg['type'], 'pos': p,
+            weather = ArenaWeather(self.root, cfg['pos'], R, cfg['weather'], t['color'], base=y0)
+            self.arenas.append({'key': cfg['key'], 'name': cfg['name'], 'type': cfg['type'], 'pos': p, 'y0': y0,
                                 'nav': 'arena:' + cfg['key'], 'control': 0.0, 'owner': None, 'contested': False,
                                 'count': {'rouge': 0, 'bleu': 0}, 'ring': ring, 'crystal': crystal,
                                 'emblem': emblem, 'label': label, 'weather': weather})
@@ -254,6 +283,12 @@ class Match(Entity):
         elif unit is self.remote:
             self.emit('feed', message, rc(col))
 
+    def fx_impact(self, kind, pos, size=.4):
+        """Impact d'un coup (au contact...), aussi montré sur l'autre PC."""
+        from game.world import fx
+        fx.impact(kind, pos, size, ground=self.stadium.walk_y(pos.x, pos.z))
+        self.emit('impact', kind, round(pos.x, 2), round(pos.y, 2), round(pos.z, 2), size)
+
     def fx_burst(self, pos, col, n=8, speed=4.0, size=.25):
         from game.world import fx
         fx.burst(None, pos, col, n=n, speed=speed, size=size)
@@ -279,7 +314,7 @@ class Match(Entity):
                 return a
         return None
 
-    def deal_damage(self, src, tgt, base, status=None, stun=0.0, raw=False):
+    def deal_damage(self, src, tgt, base, status=None, stun=0.0, raw=False, contact=False):
         if not tgt.alive:
             return
         eff = 1.0
@@ -287,15 +322,21 @@ class Match(Entity):
             dmg = base
         else:
             eff = C.TYPE_CHART.get((src.type, tgt.type), 1.0)
-            dmg = base * src.damage_mult() * eff * tgt.defense_mult()
-            a = self.arena_at(src.position)
-            if a is not None and a['type'] == src.type:
-                dmg *= C.WEATHER_BONUS
+            dmg = base * src.damage_mult() * eff * tgt.defense_mult()      # terrain compris (voir Unit.zone)
             dmg *= random.uniform(.92, 1.08)
         dmg = max(1, round(dmg))
         if tgt.invuln > 0:
             return
+        hp0 = tgt.hp
         killed = tgt.hurt(dmg, src if src is not tgt else tgt.last_hit_by, status, stun)
+        done = min(dmg, max(0, hp0))
+        if src is not None and src is not tgt and src.team and tgt.team and src.team != tgt.team:
+            self.add_stat(src, 'dmg', done)
+            if tgt.team:
+                self._hitters.setdefault(tgt.uid, {})[src.uid] = self.time
+        self.add_stat(tgt, 'taken', done)
+        if contact and src is not None and src.trait == 'Mâchoire' and src.alive:     # talent : vol de vie
+            src.heal(done * .25)
         code = 1 if eff > 1 else 2 if eff < 1 else 0
         self._damage_text(tgt, dmg, code, src)
         self.emit('hit', tgt.uid, dmg, code, src.uid if src is not None else -1)
@@ -324,7 +365,16 @@ class Match(Entity):
         kteam = killer.team if killer is not None else None
         if victim.team:                                           # joueur ou IA d'équipe
             victim.respawn_t = C.RESPAWN_TIME + .25 * self.time / 60
+            self.add_stat(victim, 'deaths', 1)
+            hitters = self._hitters.pop(victim.uid, {})
             if kteam and kteam != victim.team:
+                self.add_stat(killer, 'ko', 1)
+                if killer.trait == 'Impudence':                  # talent : chaque K.O. l'enrage
+                    killer.buffs['impudence'] = C.BUFFS['impudence']['duration']
+                self.add_stat(killer, 'points', C.POINTS_KO)
+                for uid, t in hitters.items():
+                    if uid != killer.uid and self.time - t < ASSIST_TIME:
+                        self.add_stat(self.units[uid], 'assists', 1)
                 self.score[kteam] += C.POINTS_KO
                 self._share_xp(killer, C.XP_KO)
                 self.say(f"{self.label(killer)} ({C.TEAMS[kteam]['name']}) a mis K.O. {self.label(victim)}",
@@ -340,6 +390,7 @@ class Match(Entity):
         if kteam:
             n = len(camp['units'])
             self.score[kteam] += cfg['points'] / n
+            self.add_stat(killer, 'points', cfg['points'] / n)
             self._share_xp(killer, cfg['xp'] / n)
         if all(not u.alive for u in camp['units']):
             camp['alive'] = False
@@ -363,9 +414,10 @@ class Match(Entity):
         if not kteam:
             return
         self.score[kteam] += cfg['points']
+        self.add_stat(killer, 'points', cfg['points'])
         b = C.BUFFS[cfg['buff']]
         for u in self.team_units[kteam]:
-            u.gain_xp(cfg['xp'])
+            self._gain(u, cfg['xp'])
             if u.alive:
                 u.buffs[cfg['buff']] = b['duration']
         tname = C.TEAMS[kteam]['name']
@@ -374,12 +426,20 @@ class Match(Entity):
         self.boss_squad = {'rouge': [], 'bleu': []}
 
     def _share_xp(self, killer, amount):
+        """XP d'un K.O. : tout pour le vainqueur, la moitié pour ses alliés proches."""
         if killer is None or not killer.team:
             return
-        killer.gain_xp(amount)
+        self._gain(killer, amount)
         for u in self.team_units[killer.team]:
             if u is not killer and u.alive and (flat(u.position - killer.position)).length() < 16:
-                u.gain_xp(amount * .5)
+                self._gain(u, amount * .5)
+
+    def _gain(self, u, amount):
+        """Donne de l'XP ; le joueur voit « +XP » monter au-dessus de son Pokémon."""
+        if u.level < C.MAX_LEVEL and u is self.player and u.alive:
+            floating_text(f'+{int(round(amount))} XP', u.creature.world_position + Vec3(0, u.data['scale'] * 1.6 + 1.4, 0),
+                          color.rgb(.55, .85, 1), .75)
+        u.gain_xp(amount)
 
     def label(self, u):
         """Nom affiché dans le fil : « Pikachu (J2) » pour un joueur humain à deux."""
@@ -413,9 +473,19 @@ class Match(Entity):
                 d = (flat(e.position - u.position)).length()
                 if d < rng:
                     s = d + (8 if e.team is None else 0)
-                    if s < score:
+                    if s < score and self.can_see(u, e):        # pas de visée à travers les murs
                         best, score = e, s
         return best
+
+    def can_see(self, a, b):
+        """Ligne de vue entre deux Pokémon (rien ne s'interpose), gardée en mémoire 0,15 s."""
+        key = (a.uid, b.uid) if a.uid < b.uid else (b.uid, a.uid)
+        hit = self._los.get(key)
+        if hit is not None and 0 <= self.time - hit[0] < .15:
+            return hit[1]
+        ok = self.stadium.sees(a.position, b.position)
+        self._los[key] = (self.time, ok)
+        return ok
 
     def blind_target(self, u, reach, forward):
         """Adversaire touché par un coup porté sans cible : le plus proche à portée (devant u si
@@ -425,7 +495,8 @@ class Match(Entity):
             if e.alive and self.hostile(u, e):
                 to_e = flat(e.position - u.position)
                 d = to_e.length() - e.radius
-                if d < reach and d < bd and (forward is None or d < .5 or to_e.normalized().dot(forward) > .5):
+                if d < reach and d < bd and (forward is None or d < .5 or to_e.normalized().dot(forward) > .5) \
+                        and self.can_see(u, e):
                     best, bd = e, d
         return best
 
@@ -503,6 +574,7 @@ class Match(Entity):
         if self._warmup == 0:
             from game.world.geometry import freeze_shadows
             freeze_shadows(self.game.sun)
+            self.stadium.vortex.show()
             for u in self.units:
                 if u.alive:
                     u.creature.enabled = True
@@ -542,7 +614,7 @@ class Match(Entity):
         for a in self.arenas:
             a['weather'].update(dt, self.cam_target)
             a['emblem'].rotation_y += dt * 40
-            a['emblem'].y = 9.5 + math.sin(self.time * 1.5 + a['pos'].x) * .4
+            a['emblem'].y = a['y0'] + 9.5 + math.sin(self.time * 1.5 + a['pos'].x) * .4
             a['crystal'].rotation_y -= dt * 60
 
         if self.authority:
@@ -562,6 +634,7 @@ class Match(Entity):
             self._update_spawns(dt)
             self._check_end()
         self._update_hud(dt)
+        self._update_results()
         self._place_camera(min(1, dt * 8))
         if self.net is not None:
             self.net.flush()
@@ -666,7 +739,6 @@ class Match(Entity):
             u.creature.set_pos(x, self.stadium.walk_y(x, z), z)
 
     def _update_melee(self, dt):
-        from game.world import fx
         keep = []
         for hit in self.pending_hits:
             hit[0] -= dt
@@ -676,9 +748,9 @@ class Match(Entity):
             _, src, tgt, dmg = hit
             if src.alive and tgt.alive and src.status['stun'] <= 0:
                 reach = src.data['attack']['range'] + tgt.radius + .3
-                if (flat(tgt.position - src.position)).length() < reach:
-                    self.deal_damage(src, tgt, dmg)
-                    self.fx_burst(tgt.position + Vec3(0, 1, 0), fx.style(src.type)['hot'], n=6, speed=2.5, size=.25)
+                if (flat(tgt.position - src.position)).length() < reach and self.can_see(src, tgt):
+                    self.deal_damage(src, tgt, dmg, contact=True)
+                    self.fx_impact(src.type, tgt.position + Vec3(0, 1, 0), .4)
         self.pending_hits = keep
 
     def _update_attacks(self, dt):
@@ -736,9 +808,14 @@ class Match(Entity):
             if a['owner'] != old:
                 changed = True
                 self._arena_event(a, old)
-            if a['owner']:
-                self.score[a['owner']] += C.POINTS_PER_ARENA * dt
+                if a['owner']:                   # capture : comptée pour chaque Pokémon présent
+                    for u in self.team_units[a['owner']]:
+                        if u.alive and (flat(u.position) - a['pos']).length() < R:
+                            self.add_stat(u, 'caps', 1)
             self._paint_arena(a)
+        for team in TEAM_KEYS:                   # points des arènes tenues (rendement décroissant)
+            n = sum(1 for a in self.arenas if a['owner'] == team)
+            self.score[team] += C.ARENA_POINTS[n] * dt
         if changed:
             self._refresh_bonus()
 
@@ -807,11 +884,38 @@ class Match(Entity):
                 msg, col = 'MATCH NUL !', color.white
             self.announce(msg, None, col, big=True)
             self._show_end_text()
+            self.emit('stats', [[uid] + [round(s[k], 1) for k in STAT_KEYS] for uid, s in self.stats.items()])
 
     def _show_end_text(self):
         r, b = self.score['rouge'], self.score['bleu']
         self.end_text.text = f'Rouge {int(r)}  -  {int(b)} Bleue        [R] rejouer   [Échap] menu'
         self.end_text.enabled = True
+
+    def receive_stats(self, rows):
+        """Invité : statistiques de fin de partie envoyées par l'hôte."""
+        for row in rows:
+            s = self.stats.get(int(row[0]))
+            if s is not None:
+                for k, v in zip(STAT_KEYS, row[1:]):
+                    s[k] = float(v)
+
+    def _update_results(self):
+        """Fin de partie : la page des résultats s'affiche après la bannière de victoire."""
+        if self.state != 'end' or self.results is not None:
+            return
+        self._end_t += time.dt
+        if self._end_t >= RESULTS_DELAY:
+            from game.interface.results import Results
+            self.game.banner.enabled = False
+            self.ui.enabled = False
+            self.results = Results(self)
+
+    def _hide_results(self):
+        self._end_t = 0.0
+        if self.results is not None:
+            destroy(self.results)
+            self.results = None
+        self.ui.enabled = True
 
     def _clear_attacks(self):
         self.pending_hits = []
@@ -827,12 +931,15 @@ class Match(Entity):
         self._clear_attacks()
         self.time = 0.0
         self.score = {'rouge': 0.0, 'bleu': 0.0}
+        self._reset_stats()
+        self._hide_results()
         for a in self.arenas:
             a['control'], a['owner'], a['contested'] = 0.0, None, False
         self._refresh_bonus()
         for team in TEAM_KEYS:
             for i, u in enumerate(self.team_units[team]):
                 u.level, u.xp = 1, 0.0
+                u.check_evolution(show=False)           # retour à la forme de base
                 pos = v3(self._spawn_point(team, i))
                 if u.is_player:
                     self._teleport_human(u, pos)
@@ -876,6 +983,8 @@ class Match(Entity):
 
     def restart_view(self):
         self._clear_attacks()
+        self._reset_stats()
+        self._hide_results()
         self.state = 'play'
         self.end_text.enabled = False
         br = self.player.brain
@@ -896,7 +1005,7 @@ class Match(Entity):
         u.net_driven = False
         u.is_player = False
         u.role = 'libre'
-        u.brain = BotBrain(u, self)
+        u.brain = self.bot_brain(u)
         self.remote = None
         self.humans = [self.player]
         self.announce("Le joueur 2 a quitté la partie : l'ordinateur prend le relais.", 3.5, color.rgb(1, .8, .5))
@@ -907,6 +1016,8 @@ class Match(Entity):
         if self.net is not None:
             self.net.close()
         self._clear_attacks()
+        if self.results is not None:
+            destroy(self.results)
         fx.PARTICLES = None
         self.portraits.dispose()
         destroy(self.ui)
@@ -1004,7 +1115,7 @@ class Match(Entity):
                             color=C.TEAMS['rouge']['light'])
         self.score_b = Text(parent=ui, text='0', position=(.27, .455, -.02), origin=(-.5, 0), scale=1.2,
                             color=C.TEAMS['bleu']['light'])
-        self.timer_text = Text(parent=ui, text='30:00', position=(0, .455, -.02), origin=(0, 0), scale=1.1,
+        self.timer_text = Text(parent=ui, text=f'{C.MATCH_TIME // 60:02d}:00', position=(0, .455, -.02), origin=(0, 0), scale=1.1,
                                color=color.rgb(1, .95, .6))
         Text(parent=ui, text=f'Objectif : {C.SCORE_TO_WIN} points Dominion', position=(0, .41), origin=(0, 0),
              scale=.75, color=color.rgba(1, 1, 1, .8))
@@ -1021,7 +1132,8 @@ class Match(Entity):
                           scale=(0, .006))
             self.arena_icons.append((fill, prog))
         # --- mini-carte
-        self.map_root = Entity(parent=ui, position=(.72, .2))
+        # mini-carte réduite, calée dans le coin supérieur droit (elle ne masque plus le jeu)
+        self.map_root = Entity(parent=ui, position=(.735, .345), scale=.66)
         self.map_s = .2 / C.FIELD_RADIUS
         Entity(parent=self.map_root, model='circle', color=color.rgba(.1, .12, .25, .85), scale=.43, z=.03)
         Entity(parent=self.map_root, model='circle', color=color.rgba(.3, .55, .28, .95), scale=.4, z=.02)
@@ -1048,16 +1160,16 @@ class Match(Entity):
                                  scale=.007 if c.get('wild') else .012,
                                  position=(c['pos'].x * self.map_s, c['pos'].z * self.map_s, .005)) for c in self.camps]
         # Pokémon des équipes : leur portrait dans un médaillon aux couleurs de l'équipe
-        self.portraits = Portraits([u.species for u in self.units if u.team])
-        self.map_units = {}
+        self.portraits = Portraits([f for u in self.units if u.team for f in C.evolution_line(u.species)])
+        self.map_units, self.map_faces = {}, {}
         for u in self.units:
             if u.team:
                 col = color.rgb(1, .95, .2) if u.local else ALLY_BAR if u.is_player else C.TEAMS[u.team]['color']
-                s = .04 if u.is_player else .034
+                s = .054 if u.is_player else .046          # icônes un peu plus grosses : carte réduite
                 icon = Entity(parent=self.map_root, z=-.02 if u.local else -.01 if u.is_player else 0)
                 Entity(parent=icon, model='circle', color=col, scale=s)
                 Entity(parent=icon, model='circle', color=color.rgb(.08, .09, .14), scale=s * .8, z=-.001)
-                self.portraits.icon(icon, u.species, scale=s * .95, z=-.002)
+                self.map_faces[u] = self.portraits.icon(icon, u.form, scale=s * .95, z=-.002)
                 self.map_units[u] = icon
         # --- joueur
         p = Entity(parent=ui, position=(.36, -.33))
@@ -1073,6 +1185,11 @@ class Match(Entity):
         self.p_xp = Entity(parent=p, model='quad', color=color.rgb(.45, .8, 1), origin=(-.5, 0),
                            position=(.017, -.09, -.02), scale=(0, .008))
         self.p_buffs = Text(parent=p, text='', position=(.015, -.105, -.01), origin=(-.5, .5), scale=.72)
+        # effet du terrain (arène, rivière) sur son Pokémon, juste au-dessus de sa fiche
+        self.p_zone_bg = Entity(parent=p, model='quad', color=color.rgba(.05, .05, .08, .85), origin=(-.5, .5),
+                                position=(0, .042, -.005), scale=(.5, .036))
+        self.p_zone = Text(parent=p, text='', position=(.015, .034, -.01), origin=(-.5, .5), scale=.85)
+        self._zone_shown = None
         # --- l'autre joueur (partie à deux)
         self.ally_panel = None
         if self.remote is not None:
@@ -1088,10 +1205,9 @@ class Match(Entity):
                               color=color.rgba(1, 1, 1, .7)) if self.net is not None else None
         # --- attaques
         self.slots = {}
-        x0, step = -.8, .132
+        x0 = -.8
         self.dash_slot = MoveSlot('ESPACE', 'Esquive', parent=ui, position=(x0, -.4))
-        for i, mv in enumerate(self.player.brain.moves):
-            self.slots[mv['key']] = MoveSlot(mv['key'].upper(), mv['name'], parent=ui, position=(x0 + step * (i + 1), -.4))
+        self._build_slots()
         Text(parent=ui, text='ZQSD : bouger   Maintenir J : attaque   Clic droit : tourner   Molette : zoom   '
                               'Clic molette + glisser : déplacer la vue   Tab : carte',
              position=(x0 - .06, -.465), scale=.74, color=color.rgba(1, 1, 1, .8))
@@ -1102,10 +1218,43 @@ class Match(Entity):
         self.feed = Feed(parent=ui, position=(.86, -.06))
         self.arena_text = Text(parent=ui, text='', position=(0, .27), origin=(0, 0), scale=.95)
 
+    def _build_slots(self):
+        """Cases des attaques du joueur (reconstruites à chaque évolution)."""
+        for s in self.slots.values():
+            destroy(s)
+        x0, step = -.8, .132
+        self.slots = {}
+        for i, mv in enumerate(self.player.brain.moves):
+            self.slots[mv['key']] = MoveSlot(mv['key'].upper(), mv['name'], parent=self.ui,
+                                             position=(x0 + step * (i + 1), -.4), locked=mv.get('unlock'))
+
+    def on_evolve(self, u, old_name):
+        """Un Pokémon d'équipe vient d'évoluer (old_name) ou de reprendre sa forme de base (None)."""
+        face = self.map_faces.get(u)
+        if face is not None:
+            self.portraits.show(face, u.form)
+        if u is self.player:
+            self._build_slots()
+        if old_name is None or not self.authority:
+            return
+        t = C.TEAMS[u.team]
+        self.say(f"{old_name} ({t['name']}) évolue en {u.name} !", t['light'])
+        if u.is_player:
+            line = C.evolution_line(u.species)
+            before = {(mv['key'], mv['name']) for mv in C.moves_for(u.species, line[line.index(u.form) - 1])
+                      if not mv.get('locked')}
+            new = [mv['name'] for mv in C.moves_for(u.species, u.form)
+                   if not mv.get('locked') and (mv['key'], mv['name']) not in before]
+            msg = f'{old_name} évolue en {u.name} !'
+            if new:
+                msg += '   Nouvelles attaques : ' + ', '.join(new)
+            self.announce(msg, 4, color.rgb(1, .95, .55), to=u)
+
     def _jungle_map_texture(self):
-        """Image de la mini-carte : massifs de la jungle (vert sombre) et hautes herbes."""
+        """Image de la mini-carte : sol et massifs aux couleurs de chaque biome, hautes herbes."""
         import numpy as np
         from PIL import Image
+        from game.world import biomes
         st = self.stadium
         n = 256
         xs = (np.arange(n) + .5) / n * 2 * C.FIELD_RADIUS - C.FIELD_RADIUS
@@ -1113,8 +1262,12 @@ class Match(Entity):
         sdf = st._jsample_np(st.wall_sdf, X, Z)
         i = np.clip(np.round((X - st.j_min) / .5).astype(int), 0, st.j_n - 1)
         j = np.clip(np.round((Z - st.j_min) / .5).astype(int), 0, st.j_n - 1)
+        W = biomes.weights_np(X, Z)[..., None]
+        ground = (np.array(MAP_GROUND) * W).sum(-2)
+        massif = (np.array(MAP_MASSIF) * W).sum(-2)
         img = np.zeros((n, n, 4), np.uint8)
-        img[sdf > 0] = (22, 52, 24, 245)
+        img[..., :3] = np.where((sdf > 0)[..., None], massif, ground).astype(np.uint8)
+        img[..., 3] = np.where(sdf > 0, 245, 235)
         img[st.bush_grid[i, j] > 0] = (70, 170, 120, 235)
         img[np.hypot(X, Z) > C.FIELD_RADIUS - 1] = 0
         return Texture(Image.fromarray(img, 'RGBA'))
@@ -1156,10 +1309,20 @@ class Match(Entity):
         self.p_hp.scale_x = .466 * ratio
         self.p_hp.color = hp_color(ratio)
         self._set_text(self.p_hp_text, f'{int(pl.hp)} / {pl.max_hp}')
-        need = pl.level * C.XP_PER_LEVEL
+        need = C.xp_to_next(pl.level)
         self.p_xp.scale_x = .466 * (1 if pl.level >= C.MAX_LEVEL else pl.xp / need)
         buffs = [f"{C.BUFFS[k]['name']} {int(t)}s" for k, t in pl.buffs.items() if t > 0]
         self._set_text(self.p_buffs, '  '.join(buffs))
+        zone = pl.zone() if pl.alive else None
+        eff = C.zone_effect(zone, pl.type) if zone else {}
+        key = (zone, pl.type)
+        if key != self._zone_shown:
+            self._zone_shown = key
+            self.p_zone.enabled = self.p_zone_bg.enabled = bool(eff)
+            if eff:
+                gain = eff.get('dmg', 0) + eff.get('speed', 0) - eff.get('taken', 0)
+                self.p_zone.text = f'{C.ZONE_NAMES[zone]} : {C.zone_text(eff)}'
+                self.p_zone.color = color.rgb(.55, 1, .6) if gain > 0 else color.rgb(1, .55, .5)
         if self.ally_panel is not None:
             al = self.remote or next((h for h in self.team_units['rouge'] if h.human is not None and not h.local), None)
             if al is not None:

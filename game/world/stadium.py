@@ -1,13 +1,20 @@
 """La carte du stade Pokémon Dominion : construction 3D, collisions et navigation.
 
 Disposition (voir config.py) : 5 arènes ouvertes (Nord, Ouest, Est, Sud-Ouest,
-Sud-Est), les bases des deux équipes au sud, le Boss Pit au centre, une
+Sud-Est ; l'Arène Nord est perchée sur un plateau, accessible par un escalier et des
+rampes là où arrivent les voies), les bases des deux équipes au sud, le Boss Pit au centre, une
 rivière peu profonde (praticable) du nord au sud, des voies principales et une
 jungle avec ses camps de Pokémon neutres. Le tout est entouré par les
 tribunes du stade.
 
 Jungle (façon MOBA) : des massifs infranchissables (falaises rocheuses ou
 rideaux d'arbres) séparés par des couloirs étroits et quelques clairières.
+Chaque zone a son biome (biomes.py) qui change le relief des massifs, les couleurs
+du sol et la végétation (plateau de grès au Nord, forêt luxuriante à l'Ouest,
+forêt et centrale électrique à l'Est, lagon au Sud-Ouest, champ volcanique au
+Sud-Est), et un grand décor repère (landmarks.py : volcan, cascades, arbre
+millénaire, tour Tesla, ruines...). Ni les biomes ni les grands décors ne
+touchent au tracé : murs, couloirs et buissons restent les mêmes.
 Les couloirs sont les arêtes d'un diagramme de Voronoï dont les graines sont
 symétriques (Ouest / Est). Les murs sont décrits par une fonction distance
 signée (self.wall_sdf) qui sert à la fois aux collisions, à la navigation et
@@ -32,9 +39,11 @@ from scipy.spatial import cKDTree
 from ursina import Vec3, color, lerp
 
 from game import config as C
+from game.world import biomes
 from game.world.emblems import add_emblem
-from game.world.fx import Flow
-from game.world.geometry import ChunkedBuilder, MeshBuilder
+from game.world.fx import Arcs
+from game.world.geometry import ROCKS, ChunkedBuilder, MeshBuilder, _rot_matrix, glowing
+from game.world.water import WaterBuilder, river_surface, set_time
 
 F = C.FIELD_RADIUS
 CELL = 8.0            # grille de collision
@@ -45,13 +54,10 @@ SEED_GAP = 18.0       # écart entre les graines des massifs (plus grand = massi
 CLOSED_EDGES = .2    # part des couloirs possibles qui restent fermés
 
 # ---------------------------------------------------------------- palette
-LAWN1, LAWN2 = color.rgb(.42, .72, .27), color.rgb(.35, .64, .22)
-FOREST1, FOREST2 = color.rgb(.22, .42, .15), color.rgb(.28, .38, .16)
-SAND = color.rgb(.76, .7, .52)
-LANE = color.rgb(.88, .89, .9)
-LANE_EDGE = color.rgb(.62, .64, .7)
-CURB = color.rgb(.97, .97, .98)
-SEAM = color.rgb(.74, .75, .79)
+LANE = color.rgb(.72, .71, .68)
+LANE_EDGE = color.rgb(.46, .47, .5)
+CURB = color.rgb(.84, .83, .8)
+SEAM = color.rgb(.46, .45, .44)
 NEON = color.rgb(.35, .8, 1)
 PATH = color.rgb(.62, .5, .34)
 WATER = color.rgb(.3, .78, .86)
@@ -59,7 +65,7 @@ WATER_DEEP = color.rgb(.1, .5, .78)
 WATER_Y = -.38        # surface de la rivière (son lit est creusé dans le relief)
 BRIDGE_Y = .28        # hauteur du tablier des ponts (là où l'on marche)
 HM_RES = 1.0          # finesse de la carte des hauteurs
-ROCK = color.rgb(.55, .56, .58)
+ROCK = color.rgb(.6, .57, .52)
 ROCK_DARK = color.rgb(.42, .43, .46)
 MOSS = color.rgb(.33, .52, .22)
 WOOD = color.rgb(.55, .37, .2)
@@ -70,8 +76,35 @@ NAVY2 = color.rgb(.23, .25, .46)
 TREE_GREENS = [color.rgb(.13, .45, .16), color.rgb(.18, .52, .18), color.rgb(.1, .4, .2),
                color.rgb(.22, .56, .2), color.rgb(.15, .48, .12), color.rgb(.26, .6, .22)]
 CLIFF = color.rgb(.5, .47, .44)
-BUSH_GREENS = [color.rgb(.16, .5, .38), color.rgb(.2, .58, .4), color.rgb(.13, .44, .34),
-               color.rgb(.26, .62, .42)]
+BUSH_GREENS = [color.rgb(.2, .62, .42), color.rgb(.24, .68, .44), color.rgb(.17, .56, .4),
+               color.rgb(.3, .7, .44)]
+GRASS_TIP = color.rgb(.62, .86, .42)           # bout des feuilles des hautes herbes, éclairé par le soleil
+# feuillages par biome (ordre de biomes.KEYS)
+GREENS = [TREE_GREENS,
+          [color.rgb(.36, .44, .2), color.rgb(.42, .46, .24), color.rgb(.3, .4, .18)],          # roche : olivier sec
+          [color.rgb(.1, .44, .12), color.rgb(.16, .52, .14), color.rgb(.08, .38, .14),
+           color.rgb(.22, .58, .16), color.rgb(.3, .62, .18)],                                   # plante : vert profond
+          TREE_GREENS,
+          [color.rgb(.12, .5, .36), color.rgb(.18, .56, .4), color.rgb(.1, .44, .38),
+           color.rgb(.24, .6, .36)],                                                             # eau : vert tendre
+          [color.rgb(.24, .28, .14), color.rgb(.3, .3, .16)]]                                    # feu : roussi
+BLOSSOM = [color.rgb(1, .66, .8), color.rgb(.98, .74, .86), color.rgb(.95, .58, .76), color.rgb(1, .82, .9)]
+CRYSTAL = [color.rgb(.45, .8, 1), color.rgb(.6, .9, 1), color.rgb(.55, .7, 1), color.rgb(.4, .95, .95)]
+VOLT = [color.rgb(1, .9, .35), color.rgb(1, .95, .55), color.rgb(.95, .82, .25)]
+BASALT = color.rgb(.3, .27, .26)
+BASALTS = [BASALT, color.rgb(.36, .27, .23), color.rgb(.25, .23, .23), color.rgb(.4, .33, .29)]
+OBSIDIAN = color.rgb(.14, .1, .18)
+SAND_TOP = color.rgb(.86, .76, .56)     # sable sur le dessus du grès
+ASH_TOP = color.rgb(.42, .39, .37)      # cendre sur le dessus du basalte
+# végétation du cœur des massifs, par biome : (densité, essences)
+FLORA = [
+    (1.0, ['broadleaf'] * 55 + ['conifer'] * 25 + ['tropical'] * 20 + ['outcrop'] * 4),
+    (.42, ['conifer'] * 4 + ['dry'] * 4 + ['sandstone'] * 3 + ['hoodoo'] * 2),
+    (1.0, ['broadleaf'] * 50 + ['tropical'] * 22 + ['fern'] * 16 + ['bush'] * 12 + ['outcrop'] * 3),
+    (1.0, ['broadleaf'] * 45 + ['conifer'] * 42 + ['tropical'] * 10 + ['outcrop'] * 4),
+    (.95, ['blossom'] * 34 + ['tropical'] * 30 + ['broadleaf'] * 18 + ['crystal'] * 12 + ['fern'] * 6),
+    (.55, ['dead'] * 40 + ['basalt'] * 30 + ['obsidian'] * 16 + ['vent'] * 8),
+]
 
 
 def seg_dist(px, pz, ax, az, bx, bz):
@@ -130,6 +163,18 @@ def polar(a, r, x0=0.0, z0=0.0):
     return x0 + math.sin(a) * r, z0 + math.cos(a) * r
 
 
+SHADE_LEAF = (.06, .3, .32)          # feuillage à l'ombre : bleu-vert
+SUN_LEAF = (.74, .86, .36)           # feuillage au soleil : jaune-vert
+
+
+def _hue(c, t):
+    """Décale une couleur de feuillage : t < 0 vers le bleu-vert de l'ombre, t > 0 vers le jaune-vert
+    du soleil (les peintres ne se contentent pas d'assombrir ou d'éclaircir)."""
+    target = SHADE_LEAF if t < 0 else SUN_LEAF
+    k = min(abs(t), 1) * (.45 if t < 0 else .35)
+    return color.rgba(*(c[i] * (1 - k) + target[i] * k for i in range(3)), 1)
+
+
 def shade(c, f):
     return color.rgb(min(1, c[0] * f), min(1, c[1] * f), min(1, c[2] * f))
 
@@ -151,30 +196,50 @@ def _smoothstep(a, b, x):
     return t * t * (3 - 2 * t)
 
 
+def _terrace(h, step):
+    """Relief en gradins : paliers plats séparés par de courts ressauts (strates du grès)."""
+    q = h / step
+    f = np.floor(q)
+    return step * (f + _smoothstep(.55, 1, q - f))
+
+
+def _lava_np(x, z, sdf):
+    """Coulées de lave (0 à 1) : lignes sinueuses au cœur des massifs volcaniques (le poids du
+    biome feu est appliqué par l'appelant). Jamais dans les passages."""
+    a = np.abs(np.sin(x * .105 - z * .07 + np.sin(z * .09) * 2.2 + np.sin(x * .05)))
+    b = np.abs(np.sin(z * .12 + x * .045 + np.sin(x * .08) * 1.8))
+    line = np.maximum(_smoothstep(.16, .03, a), _smoothstep(.1, .02, b) * .8)
+    return line * _smoothstep(1.2, 3.2, sdf)
+
+
 # ==================================================================== tracé
 A = {a['key']: a['pos'] for a in C.ARENAS}
 RB, BB = C.TEAMS['rouge']['base'], C.TEAMS['bleu']['base']
 
 # voies principales : (points, largeur)
 LANES = [
-    # grand anneau qui relie les arènes et les bases
-    ([A['nord'], (30, 80), (56, 64), A['est'], (86, -10), A['sud_est'], (62, -78), BB], 4.6),
-    ([A['nord'], (-30, 80), (-56, 64), A['ouest'], (-86, -10), A['sud_ouest'], (-62, -78), RB], 4.6),
-    ([RB, (0, -104), BB], 4.6),
+    # grand anneau qui relie les arènes ; au sud, il passe au-dessus des bases (sans les traverser) :
+    # les deux arènes du bas sont reliées directement, loin des dégâts de la base adverse
+    ([A['nord'], (30, 80), (56, 64), A['est'], (86, -10), A['sud_est'], (62, -78), (36, -86), (0, -88)], 4.6),
+    ([A['nord'], (-30, 80), (-56, 64), A['ouest'], (-86, -10), A['sud_ouest'], (-62, -78), (-36, -86), (0, -88)],
+     4.6),
+    # bretelles : chaque base rejoint l'anneau juste au-dessus d'elle
+    ([RB, (-36, -86)], 4.6),
+    ([BB, (36, -86)], 4.6),
     # voie centrale Ouest - Boss Pit - Est
     ([(-106, -5), (-60, -5), (-14, -5)], 5.0),
     ([(14, -5), (60, -5), (106, -5)], 5.0),
     # voie verticale Nord - Boss Pit - bas
     ([(0, 14), (0, 40), (0, 68)], 3.6),
-    ([(0, -14), (0, -104)], 3.6),
-    # liaisons bases -> arènes proches
-    ([RB, (-52, -60)], 3.4),
-    ([BB, (52, -60)], 3.4),
+    ([(0, -14), (0, -88)], 3.6),
 ]
 
+# arènes perchées sur un plateau : clé -> (hauteur, longueur des rampes d'accès)
+PLATEAUS = {'nord': (2.3, 7.5)}
+
 # rivière peu profonde : (points, largeur)
-_R_MAIN = [(0, 70), (-9, 58), (8, 44), (-8, 30), (-2, 17.5)]
-_R_LOW = [(0, -18.5), (-9, -31), (-15, -46), (-7, -62), (0, -76), (0, -90)]
+_R_MAIN = [(-6, 62.5), (-9, 58), (8, 44), (-8, 30), (-2, 17.5)]
+_R_LOW = [(0, -18.5), (-9, -31), (-15, -46), (-7, -62), (0, -76), (0, -80)]   # s'arrête avant l'anneau du sud
 RIVERS = [
     (_R_MAIN, 5.0),
     (circle_pts(0, -1, 17.5, 40), 4.4),                      # douve autour du Boss Pit
@@ -192,29 +257,44 @@ class Stadium:
         self.obstacles = []
         self.grid = {}
         self.paths = []          # chemins secondaires (points, largeur)
-        self.flows = []
+        self.stand_angles = {}       # angles des petites tribunes de chaque arène
+        self.wb = WaterBuilder()     # eau et lave animées (un seul maillage, voir water.py)
+        self.emitters = []           # sources de particules du décor : (x, y, z, genre, taille)
+        self.time = 0.0
         self._plan_paths()
         self._plan_jungle()
+        self.biome = biomes.BiomeMap(F + 6)
+        self.terrain_marks = []          # (x, z, rayon, profil) : reliefs ajoutés par les grands décors
+        from game.world.landmarks import Landmarks
+        self.landmarks = Landmarks(self)
+        self.landmarks.plan()
+        self._plan_plateaus()
         self._build_heightmap()
         self._new_builders()
         self._build_ground()
         self._build_lanes()
         self._build_river()
         self._build_stands()
+        self._build_plateaus()
+        self.arcs = Arcs(self.root, random.Random(5))
         self._build_arenas()
         self._build_bases()
         self._build_pit()
         self._build_camps()
         self._build_jungle()
+        self.landmarks.build()
         self._flush()
         self._build_nav()
 
     def _flush(self):
         """Transforme les constructeurs restants en entités (quelques gros maillages)."""
+        det = C.QUALITY.get('detail', 1.0)
         for b, em in ((self.b, 0), (self.glow, .95), (self.water, .22), (self.flat, 0)):
             if b.count:
-                b.static(self.root, emissive=em, transparent=b is self.water)
+                b.static(self.root, emissive=em, transparent=b is self.water,
+                         detail=det * (.7 if b is self.b else .4 if b is self.flat else 0))
         self._new_builders()
+        self.water_node = self.wb.build(self.root)
 
     def _new_builders(self):
         # décor éclairé, parties lumineuses (posés sur le relief) et eau (surface plane)
@@ -302,6 +382,37 @@ class Stadium:
             if self.blocked(p.x, p.z, radius):
                 return False
         return True
+
+    def shot_blocked(self, x, z):
+        """Vrai si une attaque passant en (x, z) heurte un massif de la jungle, une falaise ou un
+        obstacle solide (arbre, rocher, pilier...)."""
+        if self.wall_dist(x, z) > .15:
+            return True
+        for ox, oz, orad in self.nearby(x, z, 0):
+            if (x - ox) ** 2 + (z - oz) ** 2 < orad * orad:
+                return True
+        return False
+
+    def clear_line(self, a, b, step=.7):
+        """Part (0 à 1) du segment [a, b] parcourue avant le premier obstacle (1 : voie libre)."""
+        dx, dz = b.x - a.x, b.z - a.z
+        n = max(1, int(math.hypot(dx, dz) / step))
+        for i in range(1, n + 1):
+            t = i / n
+            if self.shot_blocked(a.x + dx * t, a.z + dz * t):
+                return (i - 1) / n
+        return 1.0
+
+    def sees(self, a, b):
+        """Vrai si rien ne s'interpose entre a et b (ligne de vue, portée des attaques)."""
+        return self.clear_line(a, b) >= 1.0
+
+    def reach(self, a, b):
+        """Point le plus proche de b atteignable depuis a en ligne droite (avant un mur)."""
+        t = self.clear_line(a, b)
+        if t >= 1.0:
+            return Vec3(b.x, 0, b.z)
+        return Vec3(a.x + (b.x - a.x) * t, 0, a.z + (b.z - a.z) * t)
 
     # ================================================================ espaces libres
     def _open_np(self, xs):
@@ -487,13 +598,32 @@ class Stadium:
             b.add('cyl24', (pts[0][0], y, pts[0][1]), (width, h, width), col=col)
 
     def _rock(self, b, x, z, s, moss=.4, rng=None):
-        """Rocher aux formes irrégulières, parfois couvert de mousse."""
+        """Rocher à facettes, le dessus parfois couvert de mousse."""
         rng = rng or self.rng
-        rot = (rng.uniform(-12, 12), rng.uniform(0, 180), rng.uniform(-12, 12))
+        rot = (rng.uniform(-10, 10), rng.uniform(0, 360), rng.uniform(-10, 10))
         c = shade(ROCK, rng.uniform(.8, 1.12))
-        b.add('blob', (x, s * .28, z), (s * 1.7, s * 1.15, s * 1.4), rot=rot, col=c, wobble=.24, grad=.4)
-        if rng.random() < moss:
-            b.add('blob', (x, s * .66, z), (s * 1.2, s * .38, s * 1.0), rot=rot, col=MOSS, wobble=.22, grad=.25)
+        b.add(rng.choice(ROCKS), (x, s * .32, z), (s * 1.7, s * 1.25, s * 1.45), rot=rot, col=c, grad=.3,
+              cap=(MOSS, .85) if rng.random() < moss else None)
+
+    def _canopy(self, b, x, y, z, r, h, g, n=7, leafy=True):
+        """Couronne de feuillage : un cœur et des touffes qui s'éclairent comme un seul volume doux
+        (normales depuis le centre), bleu-vert à l'ombre, jaune-vert au soleil."""
+        rng = self.rng
+        vol = (x, y + h * .15, z, .9)
+        hue = _hue if leafy else (lambda c, t: shade(c, .86 + .16 * t))      # fleurs : pas de teinte verte
+        sun = (SUN_LEAF, .22) if leafy else None
+        b.add('blob', (x, y, z), (r * 1.75, h * 1.25, r * 1.75), rot=(0, rng.uniform(0, 180), 0),
+              col=hue(g, -.6), wobble=.22, grad=.2, volume=vol)
+        for i in range(n):
+            a = i * 360 / n + rng.uniform(-22, 22)
+            up = rng.uniform(-.25, .9)                     # hauteur relative de la touffe
+            ox, oz = polar(a, r * (1 - max(up, 0) * .5) * rng.uniform(.72, .98))
+            t = r * rng.uniform(.6, .82)
+            b.add('blob_lo', (x + ox, y + up * h * .7, z + oz), (t * 1.3, t * 1.05, t * 1.3),
+                  rot=(rng.uniform(-10, 10), rng.uniform(0, 180), 0), col=hue(g, up - .2 + rng.uniform(-.1, .1)),
+                  wobble=.26, tip=sun, volume=vol)
+        b.add('blob_lo', (x + rng.uniform(-.2, .2) * r, y + h * .75, z + rng.uniform(-.2, .2) * r),
+              (r * 1.15, r * .8, r * 1.15), col=hue(g, .6), wobble=.24, tip=sun, volume=vol)
 
     # ================================================================ sol
     def _plan_paths(self):
@@ -533,8 +663,10 @@ class Stadium:
         return open_d, river_d, lane_d, disc_d
 
     def _build_heightmap(self):
-        """Relief : collines dans la jungle, légères ondulations sur les pelouses, lit de rivière
-        creusé bordé de petits talus. Voies, arènes, bases, Boss Pit et camps restent plats."""
+        """Relief : massifs de la jungle surélevés selon leur biome (collines, plateau de grès en
+        terrasses au Nord, crêtes de basalte creusées de coulées de lave au Sud-Est, buttes douces
+        du lagon), légères ondulations sur les pelouses, lit de rivière creusé bordé de petits
+        talus. Voies, arènes, bases, Boss Pit et camps restent plats."""
         n = int(F + 6)
         xs = np.arange(-n, n + HM_RES / 2, HM_RES)
         X, Z = np.meshgrid(xs, xs, indexing='ij')
@@ -544,16 +676,37 @@ class Stadium:
                + (np.sin(X * .21 + Z * .17) * np.sin(Z * .19 - X * .07) * .5 + .5) * 1.0)
         bumps = np.sin(X * .55 + np.sin(Z * .4) * 1.5) * np.sin(Z * .5 + X * .2) * .5 + .5
         flat_d = np.minimum(lane_d, disc_d)
-        # les massifs de la jungle sont surélevés (collines), les couloirs à peine vallonnés
-        wall = _smoothstep(-.5, 5, self._jsample_np(self.wall_sdf, X, Z))
+        sdf = self._jsample_np(self.wall_sdf, X, Z)
+        Wb = biomes.weights_np(X, Z)
+        # les massifs de la jungle sont surélevés, les couloirs à peine vallonnés
+        wall = _smoothstep(-.5, 5, sdf)
+        hill = big * wall * 1.3 + 1.2 * wall
+        mesa = _terrace(_smoothstep(-.3, 2.8, sdf) * (3.2 + big * .7), 1.1)
+        ridge = 1 - np.abs(np.sin(X * .16 + np.sin(Z * .11) * 1.8) * np.cos(Z * .14 + np.sin(X * .09) * 1.4))
+        volcanic = wall * (1.5 + ridge ** 2 * 2.6 + big * .35) - 1.4 * _lava_np(X, Z, sdf)
+        lagoon = wall * (1.0 + big * .6)
+        massif = (Wb[..., biomes.JUNGLE] * hill + Wb[..., biomes.ROCHE] * mesa + Wb[..., biomes.PLANTE] * hill * 1.1
+                  + Wb[..., biomes.ELECTRIK] * hill + Wb[..., biomes.EAU] * lagoon + Wb[..., biomes.FEU] * volcanic)
         jungle = _smoothstep(1.5, 9, open_d)
         lawn = _smoothstep(.8, 4.5, np.minimum(flat_d, river_d + 2))
-        H = amp * (big * wall * 1.3 + 1.2 * wall + bumps * (.35 * lawn + .3 * jungle))
+        H = amp * (massif + bumps * (.35 * lawn + .3 * jungle))
+        # reliefs des grands décors : volcan, collines (ajoutés), puis bassins (aplanis)
+        for x0, z0, r, fn, mode in sorted(self.terrain_marks, key=lambda m: m[4] == 'flat'):
+            d = np.hypot(X - x0, Z - z0) / r
+            if mode == 'add':
+                H += amp * fn(d)
+            else:
+                target, m = fn(d)
+                H = H * (1 - m) + target * m
         # rivière : lit profond au centre, berges en pente, petit talus juste derrière
         H -= 1.3 * (1 - _smoothstep(-2.4, .9, river_d))
         H += amp * .4 * np.exp(-((river_d - 2.4) / 1.2) ** 2) * _smoothstep(.5, 2.5, flat_d)
+        P = self._plateau_np(X, Z)                     # arènes perchées (hauteur de jeu : pas d'échelle)
+        H = np.where(P > 0, np.maximum(H, P), H)
         H *= 1 - _smoothstep(F - 7, F - 2, np.hypot(X, Z))
         self.hm, self.hm_n, self.hm_min = H, len(xs), -n
+        # occlusion ambiante : les creux (pied des falaises, ravines) sont plus sombres
+        self.hm_ao = np.clip((ndimage.gaussian_filter(H, 2.2) - H) * .32, -.08, .38)
         self.hm_gx, self.hm_gz = np.gradient(H, HM_RES)
         # hauteur où l'on marche : comme le sol, sauf sur les voies (planes) et les ponts
         on_lane = lane_d < .4
@@ -606,32 +759,61 @@ class Stadium:
                         + .15 * np.sin(x * .45 + z * .38), 0, 1)[..., None]
         noise2 = np.clip(.5 + .5 * np.sin(x * .31 + np.cos(z * .23) * 2.5) * np.sin(z * .27 + x * .05), 0, 1)[..., None]
         open_d, river_d, _, _ = self._fields_np(x, z)
+        W = biomes.weights_np(x, z)[..., None]                 # (…, 6, 1)
+        wf, wr = W[..., biomes.FEU, :], W[..., biomes.ROCHE, :]
+
+        def palette(pal, t):
+            """Couleur par biome (deux teintes mélangées par t), pondérée par les poids des biomes."""
+            a, b_ = np.array([p[0] for p in pal]), np.array([p[1] for p in pal])
+            t = t[..., None, None]
+            return ((a * (1 - t) + b_ * t) * W).sum(-2)
+
         # pelouse claire autour des zones de jeu, sous-bois plus sombre dans la jungle
         jungle = _smoothstep(1.0, 6.0, open_d)[..., None]
-        lawn = np.array(tuple(LAWN1)) * (1 - noise) + np.array(tuple(LAWN2)) * noise
-        forest = np.array(tuple(FOREST1)) * (1 - noise2) + np.array(tuple(FOREST2)) * noise2
+        lawn = palette(biomes.LAWN, noise[..., 0]) * (.95 + .1 * noise2)
+        sand = _smoothstep(.62, .82, noise2) * W[..., biomes.EAU, :] * .8      # plages du lagon
+        lawn = lawn * (1 - sand) + np.array(biomes.BANK[biomes.EAU]) * sand
+        forest = palette(biomes.FOREST, noise2[..., 0])
         col = lawn * (1 - jungle) + forest * jungle
         # couloirs de la jungle : sentier de terre au milieu, mousse au pied des murs
         wsd = self._jsample_np(self.wall_sdf, x, z)
         trail = jungle * (1 - _smoothstep(-2.6, -.8, wsd))[..., None] * (.35 + .25 * noise)
-        col = col * (1 - trail) + np.array([.42, .34, .22, 1]) * trail
-        moss = (_smoothstep(-1.2, .5, wsd) * .5)[..., None]
-        col = col * (1 - moss) + np.array([.17, .32, .13, 1]) * moss
-        # sommets des collines un peu plus clairs, creux plus sombres
-        col[..., :3] *= (.88 + .07 * np.clip(y, -1.2, 3.5))[..., None]
+        col = col * (1 - trail) + (np.array([.42, .34, .22]) * (1 - wf) + np.array([.23, .19, .17]) * wf) * trail
+        moss = (_smoothstep(-1.2, .5, wsd) * .5)[..., None] * (1 - wf - wr)
+        col = col * (1 - moss) + np.array([.17, .32, .13]) * moss
+        # pentes raides : roche nue (strates colorées du grès sur le plateau Nord)
+        slope = np.hypot(gx, gz)[..., None]
+        rock = (np.array(biomes.ROCK) * W).sum(-2)
+        mossy = (_smoothstep(.45, .8, noise2) * .45) * (1 - wf - wr)
+        rock = rock * (1 - mossy) + np.array([.3, .42, .2]) * mossy
+        band = np.floor(y * 1.7 + np.sin(x * .09 + z * .05) * .8).astype(int) % len(biomes.STRATA)
+        strata = np.array(biomes.STRATA)[band] * (.93 + .1 * noise)
+        rock = rock * (1 - wr) + strata * wr
+        steep = _smoothstep(.45, 1.1, slope) * _smoothstep(-.5, .8, wsd)[..., None]
+        col = col * (1 - steep) + rock * steep
+        # sommets un peu plus clairs, creux et pieds de falaise plus sombres
+        col *= (.88 + .07 * np.clip(y, -1.2, 3.5))[..., None]
+        col *= 1 - self._sample_np(self.hm_ao, x, z)[..., None]
         bank = (1 - _smoothstep(.2, 2.0, river_d))[..., None]
-        col = col * (1 - bank) + np.array(tuple(SAND)) * bank
+        col = col * (1 - bank) + (np.array(biomes.BANK) * W).sum(-2) * bank
         depth = np.clip((WATER_Y - y) / 1.0, 0, 1)[..., None]     # lit : plus sombre en profondeur
-        col = col * (1 - depth) + np.array([.08, .3, .42, 1]) * depth
+        col = col * (1 - depth) + np.array([.08, .3, .42]) * depth
+        # coulées de lave lumineuses dans les massifs volcaniques
+        lava = _lava_np(x, z, wsd)[..., None] * wf
+        hot = _smoothstep(.55, 1, lava)
+        col = col * (1 - lava) + (np.array(biomes.LAVA) * (1 - hot) + np.array(biomes.LAVA_HOT) * hot) * lava
+        glow = lava * .95
+        self.landmarks.paint(x, z, y, col, glow)
         edge = _smoothstep(F - 3.5, F - 1.5, rr)[..., None]
-        col = col * (1 - edge) + np.array([.34, .34, .4, 1]) * edge
-        col[..., 3] = 1
+        col = col * (1 - edge) + np.array([.34, .34, .4]) * edge
+        col = np.concatenate([col, 1 + glow], -1)
         NR, NA = rr.shape
         idx = np.arange(NR * NA).reshape(NR, NA)
         a, b_, c, d = idx[:-1, :-1], idx[:-1, 1:], idx[1:, :-1], idx[1:, 1:]
         tris = np.stack([a, c, b_, b_, c, d], -1).reshape(-1)
         verts = np.stack([x, y, z], -1).reshape(-1, 3)
-        MeshBuilder().add_raw(verts, tris, norms.reshape(-1, 3), col.reshape(-1, 4)).static(self.root)
+        MeshBuilder().add_raw(verts, tris, norms.reshape(-1, 3), col.reshape(-1, 4)).static(
+            self.root, detail=C.QUALITY.get('detail', 1.0))
 
     # ================================================================ voies
     def _lane_pieces(self, pts, cut_river=False):
@@ -641,7 +823,7 @@ class Stadium:
             if cut_river and any(polyline_dist(x, z, rp) < rw / 2 + .5 for rp, rw in RIVERS):
                 return True
             for a in C.ARENAS:
-                if math.hypot(x - a['pos'][0], z - a['pos'][1]) < C.ARENA_RADIUS + 1.8:
+                if math.hypot(x - a['pos'][0], z - a['pos'][1]) < self.arena_reach(a['key'], 1.8):
                     return True
             for t in C.TEAMS.values():
                 if math.hypot(x - t['base'][0], z - t['base'][1]) < C.BASE_RADIUS + 1.5:
@@ -675,10 +857,11 @@ class Stadium:
         b, glow = self.flat, self.glow
         lanes = [(piece, w) for pts, w in LANES for piece in self._lane_pieces(pts)]
         dry = [(piece, w) for pts, w in LANES for piece in self._lane_pieces(pts, cut_river=True)]
+        rng = random.Random(3)          # tirage à part : ne décale pas le décor des arènes
         for pts, w in dry:
             main = w >= 4.5
             self._ribbon(b, pts, w + 1.3, LANE_EDGE, .04, h=.08)
-            self._ribbon(b, pts, w, LANE, .07, h=.08)
+            self._ribbon(b, pts, w, SEAM, .07, h=.08)
             dist = 0.0
             for (ax, az), (bx, bz) in zip(pts, pts[1:]):
                 dx, dz = bx - ax, bz - az
@@ -689,10 +872,11 @@ class Stadium:
                 for s in (-1, 1):       # bordures
                     b.add('box', ((ax + bx) / 2 + px * s * (w / 2 + .32), .12, (az + bz) / 2 + pz * s * (w / 2 + .32)),
                           (.34, .2, L), rot=(0, yaw, 0), col=CURB)
-                k = 1.25
-                while k < L:            # joints du dallage
-                    b.add('box', (ax + ux * k, .113, az + uz * k), (w, .01, .07), rot=(0, yaw, 0), col=SEAM)
-                    k += 2.5
+                n = max(1, round(L / 2.5))
+                for i in range(n):      # dalles de pierre (les joints restent visibles entre elles)
+                    k = (i + .5) * L / n
+                    b.add('box', (ax + ux * k, .08, az + uz * k), (w - .12, .08, L / n - .07), rot=(0, yaw, 0),
+                          col=shade(LANE, rng.uniform(.94, 1.04)))
                 k = (12 - dist % 12) % 12
                 while k < L:            # balises lumineuses
                     for s in (-1, 1):
@@ -729,7 +913,7 @@ class Stadium:
     def _inside_open_disc(self, x, z):
         """Vrai si le point est dans une arène, une base ou le Boss Pit (pas de balise là)."""
         for a in C.ARENAS:
-            if math.hypot(x - a['pos'][0], z - a['pos'][1]) < C.ARENA_RADIUS + 4:
+            if math.hypot(x - a['pos'][0], z - a['pos'][1]) < self.arena_reach(a['key'], 4):
                 return True
         for t in C.TEAMS.values():
             if math.hypot(x - t['base'][0], z - t['base'][1]) < C.BASE_RADIUS + 4:
@@ -779,10 +963,9 @@ class Stadium:
 
     # ================================================================ rivière
     def _build_river(self):
-        b, water, rng = self.b, self.water, self.rng
-        for pts, w in RIVERS:
-            # surface translucide : on devine le lit plus sombre au centre
-            self._ribbon(water, pts, w + .8, color.rgba(.3, .74, .9, .62), WATER_Y, h=.03)
+        b, rng = self.b, self.rng
+        verts, tris, flow, depth = river_surface(self, RIVERS, WATER_Y)
+        self.wb.add_raw(verts, tris, flow, depth, speed=.45)
         for pts, w in RIVERS:
             for (ax, az), (bx, bz) in zip(pts, pts[1:]):
                 dx, dz = bx - ax, bz - az
@@ -809,14 +992,17 @@ class Stadium:
                         o = rng.uniform(-w * .35, w * .35)
                         qx, qz = cx + px * o, cz + pz * o
                         if self._clear_of_lanes(qx, qz, .3):
-                            water.add('cyl24', (qx, WATER_Y + .03, qz), (1, .03, 1), col=color.rgb(.25, .6, .25))
+                            f = self.flat
+                            f.add('cyl24', (qx, WATER_Y + .03, qz), (1.1, .03, .95), rot=(0, rng.uniform(0, 360), 0),
+                                  col=shade(color.rgb(.25, .55, .22), rng.uniform(.85, 1.1)))
+                            f.add('box', (qx + .28, WATER_Y + .05, qz), (.5, .03, .06), rot=(0, rng.uniform(0, 360), 0),
+                                  col=color.rgb(.12, .3, .2))                   # l'encoche de la feuille
                             if rng.random() < .4:
-                                water.add('sphere_lo', (qx, WATER_Y + .11, qz), .28, col=color.rgb(1, .6, .8))
-        for pts, w in RIVERS:
-            if len(pts) > 2:
-                self.flows.append(Flow(self.root, [(x, WATER_Y + .05, z) for x, z in pts], count=int(len(pts) * 1.8),
-                                       col=color.rgb(.88, .97, 1), size=(.3, .04, .7), speed=3.0,
-                                       jitter=w * .32, glow=.8, rng=rng))
+                                for k in range(5):
+                                    fx_, fz_ = polar(k * 72, .12, qx, qz)
+                                    f.add('sphere_lo', (fx_, WATER_Y + .12, fz_), (.18, .1, .14), rot=(0, k * 72, 30),
+                                          col=color.rgb(1, .72, .86))
+                                f.add('sphere_lo', (qx, WATER_Y + .14, qz), .1, col=color.rgb(1, .9, .4))
 
     # ================================================================ stade
     def _build_stands(self):
@@ -899,13 +1085,137 @@ class Stadium:
             ox, oz = polar(ang, -.35)
             glow.add('box', (x + ox, 7.6, z + oz), (20, .3, .1), rot=(0, ang, 0), col=color.white)
 
+    # ================================================================ plateaux
+    def _plan_plateaus(self):
+        """Arènes perchées : plateau rond (rayon rp) bordé de falaises, une rampe par voie d'accès."""
+        self.plateaus = {}
+        for a in C.ARENAS:
+            if a['key'] in PLATEAUS:
+                h, L = PLATEAUS[a['key']]
+                x0, z0 = a['pos']
+                gates = self._gate_angles(x0, z0, C.ARENA_RADIUS + 4.5, margin=.1)
+                self.plateaus[a['key']] = {'pos': (x0, z0), 'h': h, 'L': L, 'rp': C.ARENA_RADIUS + 3.2,
+                                           'gates': [(ang, w / 2 + 1.8) for ang, w in gates]}
+
+    def arena_floor(self, key):
+        """Hauteur du sol d'une arène (0, ou la hauteur de son plateau)."""
+        p = self.plateaus.get(key)
+        return p['h'] if p else 0.0
+
+    def arena_reach(self, key, margin):
+        """Rayon autour d'une arène où les voies s'arrêtent (au pied des rampes si elle est perchée)."""
+        p = self.plateaus.get(key)
+        return p['rp'] + p['L'] + .3 if p else C.ARENA_RADIUS + margin
+
+    def _plateau_np(self, X, Z):
+        """Hauteur des plateaux et de leurs rampes aux points numpy (0 ailleurs)."""
+        H = np.zeros(X.shape)
+        for p in self.plateaus.values():
+            dx, dz = X - p['pos'][0], Z - p['pos'][1]
+            top = _smoothstep(p['rp'] + 1.3, p['rp'] + .1, np.hypot(dx, dz))
+            for ang, half in p['gates']:
+                ux, uz = math.sin(math.radians(ang)), math.cos(math.radians(ang))
+                along, side = dx * ux + dz * uz, np.abs(dz * ux - dx * uz)
+                ramp = np.clip(1 - (along - p['rp']) / p['L'], 0, 1) * (along > 0)
+                top = np.maximum(top, ramp * _smoothstep(half + 2.4, half - .1, side))   # flancs en pente douce
+            H = np.maximum(H, p['h'] * top)
+        return H
+
+    def _in_gate(self, p, ang, extra=0.0):
+        return any(abs((ang - g + 180) % 360 - 180) < math.degrees(math.atan2(half + extra, p['rp'])) + 1
+                   for g, half in p['gates'])
+
+    def _build_plateaus(self):
+        """Falaises en colonnes de grès (infranchissables), escalier face au centre de la carte,
+        rampes dallées pour les autres voies, et la source de la rivière qui tombe du plateau."""
+        b, rng = self.b, random.Random(29)
+        for key, p in self.plateaus.items():
+            (x0, z0), h, rp = p['pos'], p['h'], p['rp']
+            for k in range(120):                          # on ne grimpe pas aux falaises
+                ang = k * 3
+                if not self._in_gate(p, ang, .5):
+                    self.block(*polar(ang, rp + .8, x0, z0), 1.0)
+            src = RIVERS[0][0][0]
+            fall = math.degrees(math.atan2(src[0] - x0, src[1] - z0))
+            for row, (rr, lo, hi) in enumerate(((rp + .45, h + .15, h + .75), (rp + 1.4, h * .45, h + .2))):
+                n = int(2 * math.pi * rr / 1.2)
+                for k in range(n):
+                    ang = k * 360 / n + rng.uniform(-1.5, 1.5)
+                    if self._in_gate(p, ang, .3 + row) or abs((ang - fall + 180) % 360 - 180) < 3.5:
+                        continue
+                    x, z = polar(ang, rr + rng.uniform(-.25, .25), x0, z0)
+                    hc = rng.uniform(lo, hi)
+                    b.add(rng.choice(('prism6', 'prism5')), (x, hc / 2 - self.ground_y(x, z) - .15, z),
+                          (rng.uniform(1.35, 1.85), hc + .3, rng.uniform(1.2, 1.6)),
+                          rot=(rng.uniform(-3, 3), rng.uniform(0, 60), rng.uniform(-3, 3)),
+                          col=shade(rng.choice(biomes.STRATA), rng.uniform(.8, 1.0)), grad=.5, cap=(SAND_TOP, .75))
+            for k in range(26):                           # blocs tombés au pied des falaises
+                ang = rng.uniform(0, 360)
+                if self._in_gate(p, ang, 2.5):
+                    continue
+                x, z = polar(ang, rp + rng.uniform(2.3, 3.6), x0, z0)
+                t = rng.uniform(.4, .9)
+                b.add(rng.choice(ROCKS), (x, t * .3, z), (t * 1.7, t * 1.1, t * 1.4), rot=(0, rng.uniform(0, 360), 0),
+                      col=shade(rng.choice(biomes.STRATA), rng.uniform(.8, 1.0)), grad=.3, cap=(SAND_TOP, .5))
+            centre = math.degrees(math.atan2(-x0, -z0))  # l'escalier regarde le centre de la carte
+            stairs = min(p['gates'], key=lambda g: abs((g[0] - centre + 180) % 360 - 180))[0]
+            for ang, half in p['gates']:
+                self._ramp(p, ang, half, rng, ang == stairs)
+            self._plateau_spring(p, fall, rng)
+
+    def _ramp(self, p, ang, half, rng, stairs):
+        """Accès au plateau : escalier de pierre ou rampe dallée, murets de colonnes de chaque côté."""
+        (x0, z0), h, rp, L = p['pos'], p['h'], p['rp'], p['L']
+        ux, uz = math.sin(math.radians(ang)), math.cos(math.radians(ang))
+        px, pz = uz, -ux
+        f = self.flat
+        stone = color.rgb(.78, .68, .52)
+        if stairs:
+            n = 9
+            for i in range(n):
+                t = (i + .5) / n
+                top = h * (1 - t) + .06
+                cx, cz = x0 + ux * (rp - .6 + (L + .6) * t), z0 + uz * (rp - .6 + (L + .6) * t)
+                f.add('box', (cx, top - .4, cz), (half * 2 - .2, .8, (L + .6) / n + .04), rot=(0, ang, 0),
+                      col=shade(stone, rng.uniform(.88, 1.04)))
+                f.add('box', (cx - ux * (L + .6) / n * .5, top + .005, cz - uz * (L + .6) / n * .5),
+                      (half * 2 - .2, .02, .12), rot=(0, ang, 0), col=shade(stone, .72))       # arête de la marche
+        else:
+            n = 4
+            pitch = math.degrees(math.atan2(h, L + .6))
+            for i in range(n):
+                t = (i + .5) / n
+                cx, cz = x0 + ux * (rp - .6 + (L + .6) * t), z0 + uz * (rp - .6 + (L + .6) * t)
+                f.add('box', (cx, h * (1 - t) + .02, cz), (half * 2 - .3, .3, math.hypot(L + .6, h) / n - .06),
+                      rot=(pitch, ang, 0), col=shade(LANE, rng.uniform(.93, 1.04)))
+        for side in (-1, 1):                              # flancs : pente de terre et quelques blocs posés
+            for k in range(3):
+                t = (k + .5) / 3
+                x = x0 + ux * (rp + L * t * .8) + px * side * (half + 1.4)
+                z = z0 + uz * (rp + L * t * .8) + pz * side * (half + 1.4)
+                r = rng.uniform(.35, .55)
+                self.b.add(rng.choice(ROCKS), (x, r * .3, z), (r * 1.6, r * 1.1, r * 1.4), rot=(0, rng.uniform(0, 360), 0),
+                           col=shade(rng.choice(biomes.STRATA), rng.uniform(.8, 1.0)), grad=.3, cap=(SAND_TOP, .5))
+
+    def _plateau_spring(self, p, fall, rng):
+        """La source de la rivière : un filet d'eau qui tombe du plateau dans son lit."""
+        (x0, z0), h, rp = p['pos'], p['h'], p['rp']
+        sx, sz = RIVERS[0][0][0]
+        lip = polar(fall, rp - .3, x0, z0)
+        pts = [(lip[0] + (sx - lip[0]) * t, h + .06 - (h + .06 - WATER_Y) * t ** 1.5, lip[1] + (sz - lip[1]) * t)
+               for t in (i / 6 for i in range(7))]
+        self.wb.curtain(pts, 1.5)
+        self.wb.disc(lip[0], h + .07, lip[1], 1.1, depth=.4, speed=.6)          # vasque au bord du plateau
+        self.emitters.append((sx, WATER_Y, sz, 'fall', 1.0))
+
     # ================================================================ arènes
     def _build_arenas(self):
         """Chaque arène a son décor thématique (voir arenas.py) et deux petites tribunes."""
         from game.world.arenas import ArenaDecor
         for a in C.ARENAS:
             x0, z0 = a['pos']
-            self._arena_stands(a, C.TYPES[a['type']], x0, z0, C.ARENA_RADIUS)
+            if a['key'] not in self.plateaus:     # sur un plateau : bannières à la place des tribunes
+                self._arena_stands(a, C.TYPES[a['type']], x0, z0, C.ARENA_RADIUS)
             ArenaDecor(self, a).build()
 
     def _arena_stands(self, a, t, x0, z0, R):
@@ -917,6 +1227,9 @@ class Stadium:
             x, z = polar(ang, R + 7, x0, z0)
             if math.hypot(x, z) > F - 8:
                 continue
+            back = math.degrees(math.atan2(x0, z0))
+            if a['type'] == 'electrik' and abs((ang - back + 180) % 360 - 180) < 62:
+                continue                  # place des tours Tesla, au fond de l'arène
             d = min(polyline_dist(x, z, pts) - w / 2 for pts, w in LANES)
             cands.append((d, ang))
         cands.sort(reverse=True)
@@ -926,6 +1239,7 @@ class Stadium:
                 chosen.append(ang)
             if len(chosen) == 2:
                 break
+        self.stand_angles[a['key']] = chosen
         for ang0 in chosen:
             for row in range(3):
                 r = R + 5.6 + row * 1.3
@@ -961,7 +1275,10 @@ class Stadium:
             # Poké Ball peinte au sol : zone de réapparition
             b.add('cyl_hi', (bx, .15, bz), (6, .03, 6), col=color.rgb(.1, .1, .12))
             b.add('cyl_hi', (bx, .16, bz), (5.6, .03, 5.6), col=color.rgb(.97, .97, .97))
-            b.add('box', (bx, .165, bz + 1.4), (5.2, .03, 2.8), col=tc)
+            half = [(bx, bz)] + [polar(a_, 2.8, bx, bz) for a_ in range(-90, 91, 6)]   # moitié nord rouge
+            verts = np.array([(x, .168, z) for x, z in half])
+            tris = np.array([(0, i + 1, i) for i in range(1, len(half) - 1)]).ravel()
+            b.add_raw(verts, tris, np.tile((0, 1, 0), (len(half), 1)), np.tile(tuple(tc), (len(half), 1)))
             b.add('box', (bx, .17, bz), (5.6, .03, .35), col=color.rgb(.1, .1, .12))
             b.add('cyl_hi', (bx, .175, bz), (1.5, .03, 1.5), col=color.rgb(.1, .1, .12))
             glow.add('cyl_hi', (bx, .18, bz), (1, .03, 1), col=color.white)
@@ -1021,85 +1338,292 @@ class Stadium:
         emb = MeshBuilder()
         add_emblem(emb, 'psy', (0, 0, 0), 2.2)
         emb.entity(parent=self.root, emissive=.8, position=(0, .14, 0), rotation_x=90, scale=(1, 1, .03))
-        for i in range(8):                # obélisques
-            ang = i * 45 + 22.5
-            x, z = polar(ang, R + 2.2)
-            b.add('box', (x, 2.2, z), (1.3, 4.4, 1.3), rot=(0, ang, 0), col=color.rgb(.28, .26, .34))
-            b.add('cone4', (x, 4.9, z), (1.5, 1, 1.5), rot=(0, ang + 45, 0), col=color.rgb(.22, .2, .28))
-            glow.add('cone4', (x, 6.3, z), (.7, .9, .7), col=purple)
-            glow.add('cone4', (x, 5.6, z), (.7, .5, .7), rot=(180, 0, 0), col=purple)
-            self.block(x, z, .9)
-        for ang in (0, 90, 180, 270):     # arches aux quatre entrées
-            x, z = polar(ang, R + 3.3)
+        self._pit_colosseum(R, purple)
+        # portail psychique qui tourne au-dessus de l'arène (au-dessus des boss)
+        v = MeshBuilder()
+        for k, (r, tilt) in enumerate(((4.2, 0), (3.3, 18), (2.4, -24), (1.5, 30))):
+            v.add('ring_thin', (0, k * .25, 0), (r * 2, .22, r * 2), rot=(tilt, k * 40, 0),
+                  col=glowing(lerp(purple, color.white, k * .12), .85))
+        v.add('sphere', (0, .4, 0), 1.1, col=glowing(color.rgb(.35, .12, .55), .6))
+        self.vortex = v.static(self.root)
+        self.vortex.set_pos(0, 10.5, 0)
+        self.vortex.hide()                # il tourne : on le montre après le calcul (figé) des ombres
+
+    def _gate_angles(self, x0, z0, r, margin=1.0):
+        """Angles (vus de (x0, z0)) où une voie coupe le cercle de rayon r : [(angle, largeur)]."""
+        hits = []
+        for k in range(180):
+            ang = k * 2
+            x, z = polar(ang, r, x0, z0)
+            w = next((w for pts, w in LANES if polyline_dist(x, z, pts) < w / 2 + margin), None)
+            hits.append((ang, w))
+        gates, group = [], []
+        start = next((i for i, (_, w) in enumerate(hits) if w is None), 0)
+        for i in range(181):
+            ang, w = hits[(start + i) % 180]
+            if w is not None:
+                group.append((ang, w))
+            elif group:
+                a0 = group[0][0]
+                gates.append(((a0 + ((group[-1][0] - a0) % 360) / 2) % 360, max(g[1] for g in group)))
+                group = []
+        return gates
+
+    def _pit_colosseum(self, R, purple):
+        """Colisée en ruine autour du Boss Pit : colonnade à arcades au nord (intacte), colonnes
+        brisées au sud (basses, pour ne pas cacher le combat à la caméra), portes monumentales
+        là où arrivent les voies. Les colonnes sont espacées : on passe entre elles."""
+        b, rng = self.b, self.rng
+        stone, dark = color.rgb(.5, .48, .55), color.rgb(.36, .34, .42)
+        # couronne dallée autour de l'arène
+        for rr_, n in ((R + .75, 44), (R + 1.95, 50), (R + 3.1, 56)):
+            for k in range(n):
+                ang = k * 360 / n + rng.uniform(-1, 1)
+                x, z = polar(ang, rr_)
+                b.add('box', (x, .09, z), (2 * math.pi * rr_ / n * .92, .06, 1.1), rot=(0, ang, 0),
+                      col=shade(stone, rng.uniform(.78, .98)))
+        rc = R + 2.4
+        gates = self._gate_angles(0, 0, rc)
+        tall = lambda ang: abs((ang + 180) % 360 - 180) < 100        # moitié nord : intacte
+        n = 20
+        cols = []
+        for k in range(n):
+            ang = k * 360 / n + 9
+            if any(abs((ang - g + 180) % 360 - 180) < 14 for g, _ in gates):
+                cols.append(None)
+                continue
+            x, z = polar(ang, rc)
+            b.add('box', (x, .35, z), (1.5, .7, 1.5), rot=(0, ang, 0), col=dark)
+            if tall(ang):
+                b.add('cyl16', (x, 3.1, z), (1.0, 4.8, 1.0), col=shade(stone, rng.uniform(.95, 1.08)), grad=.25)
+                b.add('box', (x, 5.7, z), (1.5, .45, 1.5), rot=(0, ang, 0), col=dark)
+                cols.append((x, z, ang))
+            else:                         # colonne brisée, tambours tombés au pied
+                h = rng.uniform(1.0, 2.6)
+                b.add('cyl16', (x, .7 + h / 2, z), (1.0, h, 1.0), col=shade(stone, rng.uniform(.9, 1.05)), grad=.25)
+                b.add('cone6', (x, .7 + h + .2, z), (1.0, .5, 1.0), rot=(rng.uniform(-20, 20), rng.uniform(0, 60), 0),
+                      col=shade(stone, .95))
+                if rng.random() < .6:
+                    fx, fz = polar(ang + rng.choice((-1, 1)) * 6, rc + rng.uniform(.8, 1.6))
+                    b.add('cyl16', (fx, .45, fz), (.95, 1.1, .95), rot=(90, ang + rng.uniform(-40, 40), 0),
+                          col=shade(stone, .9))
+                cols.append(None)
+            self.block(x, z, .65)
+        for a, c in zip(cols, cols[1:] + cols[:1]):   # arcades entre deux colonnes intactes voisines
+            if a is None or c is None:
+                continue
+            mx, mz = (a[0] + c[0]) / 2, (a[1] + c[1]) / 2
+            yaw = math.degrees(math.atan2(c[0] - a[0], c[1] - a[1]))
+            L = math.hypot(c[0] - a[0], c[1] - a[1])
+            b.add('box', (mx, 6.2, mz), (.9, .6, L + 1.2), rot=(0, yaw, 0), col=shade(stone, .92))
+            b.add('box', (mx, 5.75, mz), (.3, .12, L - 1.2), rot=(0, yaw, 0), col=glowing(purple, .8))
+            if rng.random() < .4:         # lierre qui pend de l'arcade
+                b.add('blob', (mx, 5.9, mz), (1.2, .8, 1.8), rot=(0, yaw, 0), col=color.rgb(.24, .42, .2), wobble=.25)
+        for ang, w in gates:              # portes monumentales aux entrées
+            half = w / 2 + 1.6
+            x, z = polar(ang, rc + .3)
+            high = tall(ang)
             for s in (-1, 1):
-                sx, sz = polar(ang + 90, 3.6 * s)
-                b.add('box', (x + sx, 2.8, z + sz), (1.1, 5.6, 1.4), rot=(0, ang, 0), col=color.rgb(.33, .31, .4))
-                self.block(x + sx, z + sz, .75)
-            b.add('box', (x, 5.9, z), (8.4, .9, 1.6), rot=(0, ang, 0), col=color.rgb(.3, .28, .37))
-            ox, oz = polar(ang, -.85)
-            glow.add('box', (x + ox, 5.9, z + oz), (6, .25, .1), rot=(0, ang, 0), col=purple)
+                sx, sz = polar(ang + 90, half * s)
+                h = 6.4 if high else 3.2
+                b.add('box', (x + sx, h / 2, z + sz), (1.3, h, 1.6), rot=(0, ang, 0), col=dark)
+                b.add('cone4', (x + sx, h + .5, z + sz), (1.0, 1.0, 1.0), rot=(0, ang + 45, 0), col=shade(dark, .8))
+                self.glow.add('cone4', (x + sx, h + 1.4, z + sz), (.55, .8, .55), col=purple)
+                self.block(x + sx, z + sz, .8)
+            if high:
+                b.add('box', (x, 6.6, z), (half * 2 + 1.6, .9, 1.8), rot=(0, ang, 0), col=shade(dark, .9))
+                ox, oz = polar(ang, -.95)
+                self.glow.add('box', (x + ox, 6.6, z + oz), (half * 2 - .6, .25, .1), rot=(0, ang, 0), col=purple)
 
     # ================================================================ camps
     def _build_camps(self):
         b, glow, rng = self.b, self.glow, self.rng
         for camp in C.CAMPS:
             x0, z0 = camp['pos']
-            b.add('cyl24', (x0, .02, z0), (11, .04, 10), col=color.rgb(.5, .5, .3))
-            b.add('cyl24', (x0, .03, z0), (8, .04, 7.4), col=color.rgb(.56, .5, .34))
-            col = C.BUFFS[camp['buff']]['color'] if camp.get('buff') else color.rgb(.85, .85, .85)
+            buff = camp.get('buff')
+            # sol et bordure du camp au thème de son gardien
+            ground = {'braise': ((.28, .24, .22), (.34, .28, .25)), 'flux': ((.62, .62, .5), (.7, .68, .56)),
+                      'bastion': ((.3, .42, .2), (.36, .46, .24))}.get(buff, ((.5, .5, .3), (.56, .5, .34)))
+            b.add('cyl24', (x0, .02, z0), (11, .04, 10), col=color.rgb(*ground[0]))
+            b.add('cyl24', (x0, .03, z0), (8, .04, 7.4), col=color.rgb(*ground[1]))
+            col = C.BUFFS[buff]['color'] if buff else color.rgb(.85, .85, .85)
             for i in range(7):
                 ang = i * 360 / 7 + 10
                 x, z = polar(ang, 5.4, x0, z0)
-                self._rock(b, x, z, rng.uniform(.45, .7), moss=.5)
+                if buff == 'braise':        # orgues de basalte et braises
+                    for _ in range(2):
+                        h = rng.uniform(.6, 1.5)
+                        b.add('prism6', (x + rng.uniform(-.4, .4), h / 2, z + rng.uniform(-.4, .4)), (.7, h, .7),
+                              rot=(0, rng.uniform(0, 60), 0), col=shade(rng.choice(BASALTS), .95), grad=.3)
+                    if i % 2:
+                        b.add('blob', (x, .06, z), (.9, .08, .7), col=glowing(biomes.LAVA, .9), wobble=.3)
+                elif buff == 'flux':        # rochers mouillés, flaques et cristaux
+                    self._rock(b, x, z, rng.uniform(.45, .7), moss=0)
+                    if i % 2:
+                        self.wb.disc(x + .8, self.ground_y(x + .8, z) + .09, z, .6, depth=.35, sx=1.4, seg=20)
+                    elif i % 3 == 0:
+                        self._crystals(b, x, z, .6)
+                else:
+                    self._rock(b, x, z, rng.uniform(.45, .7), moss=.9 if buff == 'bastion' else .5)
+                    if buff == 'bastion' and i % 2:
+                        self._tree(b, x + .3, z + .3, rng.uniform(.55, .7), 'fern', biomes.PLANTE)
             glow.add('ring_97', (x0, .07, z0), (3.2, .04, 3.2), col=col)
-            # icône flottante au-dessus du camp, comme sur la carte
+            # icône flottante au-dessus du camp, comme sur la carte : le type du Pokémon qui y vit
             glow.add('ring_thin', (x0, 6.5, z0), (2.4, .25, 2.4), col=col)
-            glow.add('sphere_lo', (x0, 6.5, z0), .8, col=col)
             b.add('cyl8', (x0, 6.5, z0), (2.2, .12, 2.2), col=color.rgb(.12, .12, .16))
+            kind = C.SPECIES[camp['species']]['type']
+            if camp.get('buff') and kind in ('feu', 'eau', 'plante'):
+                add_emblem(glow, kind, (x0, 7.0, z0), .55)
+            else:
+                glow.add('sphere_lo', (x0, 6.9, z0), .7, col=col)
 
     # ================================================================ jungle
-    def _tree(self, b, x, z, s, kind):
+    def _trunk(self, b, x, z, s, h, bark, branches=2):
+        """Tronc organique : racines qui s'étalent au sol, fût légèrement coudé qui s'affine, branches
+        qui plongent dans le feuillage. Renvoie le sommet (x, z) où poser la couronne."""
         rng = self.rng
-        bark = color.rgb(.42, .28, .16)
-        if kind == 'broadleaf':
-            b.add('cyl', (x, 1.1 * s, z), (.55 * s, 2.2 * s, .55 * s), rot=(rng.uniform(-5, 5), 0, rng.uniform(-5, 5)),
-                  col=bark, grad=.35)
-            g = rng.choice(TREE_GREENS)
-            b.add('blob', (x, 3.0 * s, z), (3.5 * s, 2.8 * s, 3.5 * s), col=g, wobble=.16, grad=.45)
-            for i in range(3):
-                ox, oz = polar(i * 120 + rng.uniform(-30, 30), 1.25 * s)
-                b.add('blob', (x + ox, (2.5 + rng.uniform(0, .8)) * s, z + oz), (2.1 * s, 1.8 * s, 2.1 * s),
-                      col=shade(g, rng.uniform(.85, 1.1)), wobble=.18, grad=.45)
-            b.add('blob', (x - .2 * s, 3.95 * s, z + .2 * s), (2.1 * s, 1.5 * s, 2.1 * s), col=shade(g, 1.2),
-                  wobble=.16, grad=.3)
+        a0 = rng.uniform(0, 360)
+        for i in range(3):                               # racines à peine sorties du sol
+            a = a0 + i * 120 + rng.uniform(-25, 25)
+            ox, oz = polar(a, .3 * s)
+            b.add('blob_lo', (x + ox, .02 * s, z + oz), (.26 * s, .22 * s, .7 * s), rot=(18, a, 0),
+                  col=shade(bark, .85), grad=.4)
+        b.add('cone8', (x, .3 * s, z), (.9 * s, .6 * s, .9 * s), col=shade(bark, .9), grad=.35)   # pied évasé
+        dx, dz = polar(rng.uniform(0, 360), rng.uniform(.15, .35) * s)                          # coude
+        lo = h * .55
+        b.add('trunk', (x + dx * .25, lo / 2, z + dz * .25), (.62 * s, lo, .62 * s),
+              rot=(math.degrees(math.atan2(dz * .5, lo)), 0, -math.degrees(math.atan2(dx * .5, lo))),
+              col=bark, grad=.45)
+        mx, mz = x + dx * .5, z + dz * .5
+        hi = h - lo + .3 * s
+        b.add('trunk', (mx + dx * .25, lo + hi / 2 - .15 * s, mz + dz * .25), (.38 * s, hi, .38 * s),
+              rot=(math.degrees(math.atan2(dz * .5, hi)), 0, -math.degrees(math.atan2(dx * .5, hi))),
+              col=shade(bark, 1.08), grad=.3, tip=(color.rgb(.62, .48, .32), .25))
+        for i in range(branches):                        # branches qui s'ouvrent vers la couronne
+            a = a0 + 45 + i * 360 / branches + rng.uniform(-30, 30)
+            ox, oz = polar(a, .5 * s)
+            b.add('trunk', (mx + ox * .6, h * .95, mz + oz * .6), (.2 * s, 1.1 * s, .2 * s),
+                  rot=(0, a, 38 + rng.uniform(-8, 8)), col=shade(bark, 1.05))
+        return x + dx, z + dz
+
+    def _tree(self, b, x, z, s, kind, bio=biomes.JUNGLE):
+        rng = self.rng
+        bark = color.rgb(.46, .31, .19)
+        greens = GREENS[bio]
+        if kind == 'blossom':           # arbre en fleurs (lagon)
+            tx, tz = self._trunk(b, x, z, s * .9, 2.8 * s, color.rgb(.44, .3, .25))
+            self._canopy(b, tx, 3.4 * s, tz, 1.4 * s, 1.2 * s, rng.choice(BLOSSOM), n=6, leafy=False)
             return 1.0 * s
-        if kind == 'conifer':
-            b.add('cyl', (x, .8 * s, z), (.45 * s, 1.6 * s, .45 * s), col=color.rgb(.4, .26, .15), grad=.35)
-            g = color.rgb(.1, .36 + rng.uniform(-.04, .04), .2)
-            for i, (r, y) in enumerate(((3.0, 2.2), (2.3, 3.5), (1.6, 4.6), (1.0, 5.5))):
-                b.add('cone', (x, y * s, z), (r * s, 1.9 * s, r * s), rot=(0, rng.uniform(0, 36), 0),
-                      col=shade(g, 1 + i * .08), wobble=.06, grad=.4)
-            return .9 * s
-        if kind == 'tropical':
-            b.add('cyl', (x, 1.8 * s, z), (.45 * s, 3.6 * s, .45 * s), rot=(rng.uniform(-6, 6), 0, rng.uniform(-6, 6)),
-                  col=color.rgb(.5, .36, .22), grad=.3)
-            g = rng.choice(TREE_GREENS)
-            for i in range(7):
-                ang = i * 360 / 7 + rng.uniform(-10, 10)
-                ox, oz = polar(ang, 1.3 * s)
-                b.add('blob', (x + ox, 3.55 * s, z + oz), (1.1 * s, .35 * s, 2.7 * s), rot=(20, ang, 0), col=g,
-                      wobble=.1, grad=.3)
-            b.add('blob', (x, 3.9 * s, z), 1.5 * s, col=shade(g, 1.15), wobble=.15, grad=.35)
+        if kind == 'dead':              # arbre calciné (champ volcanique)
+            trunk = color.rgb(.16, .13, .12)
+            h = 3.2 * s
+            b.add('cone8', (x, h / 2, z), (.6 * s, h, .6 * s), rot=(rng.uniform(-6, 6), 0, rng.uniform(-6, 6)), col=trunk)
+            for i in range(3):
+                a = i * 120 + rng.uniform(-30, 30)
+                ox, oz = polar(a, .5 * s)
+                b.add('cone6', (x + ox, (1.6 + i * .45) * s, z + oz), (.22 * s, 1.8 * s, .22 * s),
+                      rot=(0, a, rng.uniform(40, 60)), col=trunk)
+            if rng.random() < .4:       # braises au pied
+                b.add('blob', (x + .5 * s, .1, z), (.7 * s, .25, .6 * s), col=glowing(biomes.LAVA, .7), wobble=.2)
+            return .5 * s
+        if kind == 'dry':               # touffe d'herbe sèche et arbuste épineux
+            g = rng.choice(GREENS[biomes.ROCHE])
+            b.add('blob', (x, .45 * s, z), (1.9 * s, 1.1 * s, 1.9 * s), col=g, wobble=.3, grad=.45)
+            for _ in range(4):
+                h = rng.uniform(.8, 1.4) * s
+                b.add('cone6', (x + rng.uniform(-.6, .6) * s, h / 2, z + rng.uniform(-.6, .6) * s), (.2 * s, h, .2 * s),
+                      rot=(rng.uniform(-20, 20), 0, rng.uniform(-20, 20)), col=color.rgb(.72, .64, .38))
             return .8 * s
-        g = color.rgb(.2, .5 + rng.uniform(-.06, .06), .2)       # buisson fleuri
-        b.add('blob', (x, .6 * s, z), (2.8 * s, 1.8 * s, 2.8 * s), col=g, wobble=.2, grad=.45)
-        b.add('blob', (x + .6 * s, 1.05 * s, z - .3 * s), (1.7 * s, 1.3 * s, 1.7 * s), col=shade(g, 1.15),
-              wobble=.2, grad=.35)
+        if kind == 'fern':              # fougère géante
+            g = rng.choice(greens)
+            for i in range(7):
+                a = i * 360 / 7 + rng.uniform(-12, 12)
+                ox, oz = polar(a, .9 * s)
+                b.add('blob', (x + ox, .75 * s, z + oz), (.7 * s, .16 * s, 2.3 * s), rot=(-28, a, 0),
+                      col=shade(g, rng.uniform(.9, 1.15)), wobble=.1, grad=.3)
+            b.add('blob', (x, .4 * s, z), .9 * s, col=shade(g, .75), wobble=.2)
+            return .9 * s
+        if kind == 'crystal':
+            self._crystals(b, x, z, s * .9)
+            return .8 * s
+        if kind == 'hoodoo':            # cheminée de fée : colonne de grès coiffée d'un bloc
+            c = shade(rng.choice(biomes.STRATA), 1)
+            h = rng.uniform(2.6, 4.2) * s
+            b.add('prism5', (x, h / 2, z), (1.7 * s, h, 1.7 * s), rot=(0, rng.uniform(0, 90), 0), col=c, grad=.35)
+            b.add(rng.choice(ROCKS), (x, h + .1, z), (2.0 * s, .9 * s, 1.8 * s), rot=(0, rng.uniform(0, 180), 0),
+                  col=shade(rng.choice(biomes.STRATA), .9), cap=(SAND_TOP, .6))
+            return .9 * s
+        if kind == 'sandstone':         # rochers de grès
+            for _ in range(rng.randint(2, 3)):
+                t = rng.uniform(.8, 1.5) * s
+                b.add(rng.choice(ROCKS), (x + rng.uniform(-1, 1), t * .35, z + rng.uniform(-1, 1)), (t * 1.8, t * 1.2, t * 1.5),
+                      rot=(rng.uniform(-8, 8), rng.uniform(0, 360), 0), col=shade(rng.choice(biomes.STRATA), .9),
+                      grad=.35, cap=(SAND_TOP, .6))
+            return 1.2 * s
+        if kind == 'basalt':            # orgues de basalte, parfois veinées de lave
+            for _ in range(rng.randint(3, 5)):
+                h = rng.uniform(1.2, 3.2) * s
+                b.add('prism6', (x + rng.uniform(-1, 1), h / 2 - .1, z + rng.uniform(-1, 1)), (1.1 * s, h, 1.1 * s),
+                      rot=(rng.uniform(-6, 6), rng.uniform(0, 60), 0), col=shade(rng.choice(BASALTS), rng.uniform(.85, 1.15)),
+                      grad=.35, cap=(ASH_TOP, .5))
+            if rng.random() < .5:
+                b.add('blob', (x, .15, z), (1.6 * s, .2, 1.3 * s), col=glowing(biomes.LAVA, .9), wobble=.3)
+            return 1.2 * s
+        if kind == 'obsidian':
+            for _ in range(rng.randint(3, 5)):
+                h = rng.uniform(1.0, 2.6) * s
+                b.add('cone4', (x + rng.uniform(-1, 1), h / 2, z + rng.uniform(-1, 1)), (.6 * s, h, .6 * s),
+                      rot=(rng.uniform(-15, 15), rng.uniform(0, 90), rng.uniform(-15, 15)), col=OBSIDIAN)
+            return .8 * s
+        if kind == 'vent':              # cheminée volcanique : cône de scories et lueur au sommet
+            b.add('frustum', (x, .7 * s, z), (2.6 * s, 1.4 * s, 2.6 * s), col=shade(BASALT, 1.1), grad=.3)
+            b.add('cyl8', (x, 1.42 * s, z), (.55 * s, .06, .55 * s), col=glowing(biomes.LAVA_HOT, 1))
+            return 1.0 * s
+        if kind == 'broadleaf':         # feuillu : tronc qui s'affine, branches, couronne en touffes
+            tx, tz = self._trunk(b, x, z, s, 2.9 * s, bark)
+            self._canopy(b, tx, 3.5 * s, tz, 1.45 * s, 1.3 * s, rng.choice(greens))
+            return 1.0 * s
+        if kind == 'conifer':           # conifère : étages de branches tombantes
+            b.add('trunk', (x, .9 * s, z), (.45 * s, 1.8 * s, .45 * s), col=color.rgb(.38, .25, .15), grad=.35)
+            g = color.rgb(.1, .36 + rng.uniform(-.04, .04), .2)
+            if bio == biomes.ROCHE:     # pin des plateaux, plus sec
+                g = color.rgb(.2, .36 + rng.uniform(-.04, .04), .18)
+            for i in range(5):
+                r = (2.9 - i * .5) * rng.uniform(.92, 1.06)
+                b.add('cone8', (x, (1.8 + i * .92) * s, z), (r * s, 1.7 * s, r * s),
+                      rot=(rng.uniform(-4, 4), rng.uniform(0, 45), rng.uniform(-4, 4)),
+                      col=shade(g, .82 + i * .09), wobble=.12, grad=.45, light=.12)
+            return .9 * s
+        if kind == 'tropical':          # palmier : tronc courbé, palmes qui retombent
+            a0 = rng.uniform(0, 360)
+            dx, dz = polar(a0, 1)
+            for i in range(3):
+                t = i / 3
+                b.add('cyl6', (x + dx * t * t * .9 * s, (.65 + i * 1.2) * s, z + dz * t * t * .9 * s),
+                      (.42 * s, 1.35 * s, .42 * s), rot=(0, a0, -(4 + i * 7)), col=color.rgb(.5, .37, .24), grad=.25)
+            tx, ty, tz = x + dx * .8 * s, 3.8 * s, z + dz * .8 * s
+            g = rng.choice(greens)
+            for i in range(8):
+                ang = i * 45 + rng.uniform(-12, 12)
+                ox, oz = polar(ang, 1.25 * s)
+                b.add('blob', (tx + ox, ty - .15 * s, tz + oz), (.95 * s, .22 * s, 2.7 * s), rot=(26, ang, 0),
+                      col=shade(g, rng.uniform(.88, 1.12)), wobble=.12, grad=.3, light=.15)
+            b.add('blob_lo', (tx, ty + .1 * s, tz), .9 * s, col=shade(g, .8), wobble=.15)
+            for _ in range(3):
+                b.add('sphere_lo', (tx + rng.uniform(-.3, .3) * s, ty - .35 * s, tz + rng.uniform(-.3, .3) * s),
+                      .28 * s, col=color.rgb(.45, .32, .15))
+            return .8 * s
+        g = rng.choice(greens)          # buisson fleuri
+        for i in range(4):
+            ox, oz = polar(i * 90 + rng.uniform(-30, 30), .6 * s if i else 0)
+            t = rng.uniform(1.2, 1.7) * s
+            b.add('blob_lo', (x + ox, .45 * t, z + oz), (t * 1.2, t, t * 1.2), col=shade(g, rng.uniform(.85, 1.1)),
+                  wobble=.25, grad=.45, light=.18)
         if rng.random() < .6:
             fc = rng.choice((color.rgb(1, .4, .55), color.rgb(1, .9, .3), color.white, color.rgb(.7, .5, 1)))
-            for _ in range(5):
-                ox, oz = polar(rng.uniform(0, 360), rng.uniform(.4, 1.2) * s)
-                b.add('sphere_lo', (x + ox, 1.3 * s, z + oz), .22, col=fc)
+            for _ in range(6):
+                ox, oz = polar(rng.uniform(0, 360), rng.uniform(.3, 1.1) * s)
+                b.add('sphere_lo', (x + ox, 1.25 * s, z + oz), .2, col=fc)
         return 1.2 * s
 
     def _outcrop(self, b, x0, z0, block=True):
@@ -1109,11 +1633,8 @@ class Stadium:
             ox, oz = rng.uniform(-3, 3), rng.uniform(-3, 3)
             s = rng.uniform(1.2, 2.6)
             rot = (rng.uniform(-10, 10), rng.uniform(0, 180), rng.uniform(-10, 10))
-            b.add('blob', (x0 + ox, s * .75, z0 + oz), (s * 1.9, s * 2.1, s * 1.7), rot=rot,
-                  col=shade(ROCK, rng.uniform(.8, 1.1)), wobble=.22, grad=.45)
-            if rng.random() < .5:
-                b.add('blob', (x0 + ox, s * 1.72, z0 + oz), (s * 1.1, s * .35, s * 1.0), rot=rot, col=MOSS,
-                      wobble=.2, grad=.2)
+            b.add(rng.choice(ROCKS), (x0 + ox, s * .75, z0 + oz), (s * 1.9, s * 2.1, s * 1.7), rot=rot,
+                  col=shade(ROCK, rng.uniform(.8, 1.1)), grad=.4, cap=(MOSS, .9) if rng.random() < .6 else None)
         for _ in range(rng.randint(2, 4)):
             ox, oz = rng.uniform(-4, 4), rng.uniform(-4, 4)
             self._rock(b, x0 + ox, z0 + oz, rng.uniform(.7, 1.4))
@@ -1154,83 +1675,182 @@ class Stadium:
         return out
 
     def _cliff(self, b, x, z, nx, nz):
-        """Morceau de falaise : gros rochers serrés, coiffés de mousse, plus hauts vers l'intérieur."""
+        """Morceau de falaise : gros blocs à facettes serrés, le dessus moussu, plus hauts vers l'intérieur."""
         rng = self.rng
         yaw = math.degrees(math.atan2(nx, nz))
         h = rng.uniform(2.8, 3.9)
         c = shade(CLIFF, rng.uniform(.82, 1.12))
         px, pz = x + nx * .7, z + nz * .7
-        b.add('blob', (px, h * .42, pz), (rng.uniform(3.0, 3.8), h, 2.6),
-              rot=(rng.uniform(-6, 6), yaw + rng.uniform(-18, 18), rng.uniform(-6, 6)), col=c, wobble=.2, grad=.5)
-        if rng.random() < .75:
-            b.add('blob', (px + nx * .35, h * .88, pz + nz * .35), (2.7, .55, 2.1), rot=(0, yaw, 0),
-                  col=shade(MOSS, rng.uniform(.9, 1.1)), wobble=.22, grad=.25)
+        b.add(rng.choice(ROCKS), (px, h * .42, pz), (rng.uniform(3.2, 4.0), h * 1.2, 2.8),
+              rot=(rng.uniform(-6, 6), yaw + rng.uniform(-18, 18), rng.uniform(-6, 6)), col=c, grad=.45,
+              cap=(shade(MOSS, rng.uniform(.9, 1.1)), .9))
         if rng.random() < .55:          # deuxième rangée, plus haute
             h2 = h * rng.uniform(1.1, 1.4)
-            b.add('blob', (x + nx * 2.6, h2 * .45, z + nz * 2.6), (3.4, h2, 3.0),
-                  rot=(0, yaw + rng.uniform(-30, 30), 0), col=shade(c, .9), wobble=.22, grad=.5)
+            b.add(rng.choice(ROCKS), (x + nx * 2.6, h2 * .45, z + nz * 2.6), (3.6, h2 * 1.2, 3.2),
+                  rot=(0, yaw + rng.uniform(-30, 30), 0), col=shade(c, .9), grad=.45, cap=(MOSS, .9))
         if rng.random() < .35:          # éboulis au pied
             self._rock(b, x - nx * .5 + nz * rng.uniform(-1, 1), z - nz * .5 - nx * rng.uniform(-1, 1),
                        rng.uniform(.3, .55), moss=.3)
 
-    def _grove(self, b, x, z, nx, nz, k):
+    def _grove(self, b, x, z, nx, nz, k, bio=biomes.JUNGLE):
         """Rideau d'arbres : troncs serrés derrière une haie épaisse et des racines."""
         rng = self.rng
         yaw = math.degrees(math.atan2(nx, nz))
-        g = rng.choice(TREE_GREENS)
-        b.add('blob', (x + nx * .6, .95, z + nz * .6), (3.0, 2.1, 2.2), rot=(0, yaw + rng.uniform(-20, 20), 0),
-              col=shade(g, .8), wobble=.22, grad=.5)
+        g = rng.choice(GREENS[bio])
+        for j in (-1, 1):                # haie : deux touffes serrées
+            t = rng.uniform(.3, .9) * j
+            d = .6 + rng.uniform(0, .5)
+            b.add('blob_lo', (x + nx * d + nz * t, .9, z + nz * d - nx * t),
+                  (rng.uniform(2.2, 2.8), rng.uniform(1.8, 2.3), 2.0), rot=(0, yaw + rng.uniform(-30, 30), 0),
+                  col=shade(g, rng.uniform(.72, .9)), wobble=.26, grad=.5, light=.15)
         if rng.random() < .5:
             b.add('blob', (x + nx * .1, .3, z + nz * .1), (1.6, .6, 1.0), rot=(0, yaw, 0),
                   col=color.rgb(.36, .25, .15), wobble=.25, grad=.3)
         if k % 2 == 0:
-            self._tree(b, x + nx * 1.9, z + nz * 1.9, rng.uniform(1.0, 1.35), rng.choice(('broadleaf', 'conifer')))
+            kinds = {biomes.EAU: ('blossom', 'tropical', 'broadleaf'),
+                     biomes.PLANTE: ('broadleaf', 'broadleaf', 'tropical')}.get(bio, ('broadleaf', 'conifer'))
+            self._tree(b, x + nx * 1.9, z + nz * 1.9, rng.uniform(1.0, 1.35), rng.choice(kinds), bio)
 
     def _build_jungle(self):
         rng = self.rng
         b = self.b
-        # bords des massifs : falaises ou rideaux d'arbres selon la région
+        # bords des massifs : falaises ou rideaux d'arbres selon la région et le biome
         for k, (x, z, nx, nz) in enumerate(self._wall_points(1.9)):
-            style = math.sin(x * .045 + math.sin(z * .03) * 2) * math.cos(z * .05 + math.sin(x * .035) * 1.5)
-            if style > -.2:
-                self._cliff(b, x, z, nx, nz)
+            bio = self.biome.pick(rng, x, z)
+            if bio == biomes.ROCHE:
+                self._mesa_foot(b, x, z, nx, nz, k)
+            elif bio == biomes.FEU:
+                self._basalt_wall(b, x, z, nx, nz, k)
+            elif bio == biomes.EAU:
+                self._grove(b, x, z, nx, nz, k, bio)
+                if rng.random() < .16:
+                    self._crystals(b, x + nx * .4, z + nz * .4, rng.uniform(.7, 1.1))
+            elif bio == biomes.PLANTE:
+                self._grove(b, x, z, nx, nz, k, bio)
+                if rng.random() < .25:
+                    self._tree(b, x - nx * .2, z - nz * .2, rng.uniform(.7, .95), 'fern')
             else:
-                self._grove(b, x, z, nx, nz, k)
-            if rng.random() < .05:       # champignons au pied du mur
+                style = math.sin(x * .045 + math.sin(z * .03) * 2) * math.cos(z * .05 + math.sin(x * .035) * 1.5)
+                if style > -.2:
+                    self._cliff(b, x, z, nx, nz)
+                else:
+                    self._grove(b, x, z, nx, nz, k, bio)
+                if bio == biomes.ELECTRIK and rng.random() < .1:   # cristaux chargés d'électricité
+                    self._crystals(b, x + nx * .3, z + nz * .3, rng.uniform(.6, .9), VOLT)
+            if bio not in (biomes.ROCHE, biomes.FEU) and rng.random() < .05:       # champignons au pied du mur
                 ox, oz = x - nx * .9, z - nz * .9
                 b.add('cyl6', (ox, .2, oz), (.18, .4, .18), col=color.rgb(.95, .92, .85))
                 b.add('dome', (ox, .35, oz), (.6, .4, .6), col=color.rgb(.9, .2, .15))
-        # cœur des massifs : forêt dense (inaccessible, simple décor)
+        # cœur des massifs : végétation du biome (inaccessible, simple décor)
         S = C.QUALITY['tree_spacing']
         n = int(F / S)
-        kinds = ['broadleaf'] * 55 + ['conifer'] * 25 + ['tropical'] * 20
         for i in range(-n, n + 1):
             for j in range(-n, n + 1):
                 x = i * S + rng.uniform(-S * .38, S * .38)
                 z = j * S + rng.uniform(-S * .38, S * .38)
-                if math.hypot(x, z) > F - 3 or self.wall_dist(x, z) < 2.6:
+                if math.hypot(x, z) > F - 3 or self.wall_dist(x, z) < 2.6 or self.landmarks.reserved(x, z):
                     continue
-                if rng.random() < .04:
+                bio = self.biome.pick(rng, x, z)
+                density, kinds = FLORA[bio]
+                if rng.random() > density:
+                    continue
+                kind = rng.choice(kinds)
+                if kind == 'outcrop':
                     self._outcrop(b, x, z, block=False)
                 else:
-                    self._tree(b, x, z, rng.uniform(1.0, 1.45), rng.choice(kinds))
+                    self._tree(b, x, z, rng.uniform(1.0, 1.45), kind, bio)
         self._build_bushes()
+
+    def _mesa_foot(self, b, x, z, nx, nz, k):
+        """Pied du plateau de grès : colonnes de roche serrées (le dessus ensablé) et blocs éboulés."""
+        rng = self.rng
+        yaw = math.degrees(math.atan2(nx, nz))
+        for j in range(rng.randint(2, 3)):
+            t = rng.uniform(-1, 1)
+            d = rng.uniform(.4, 1.6)
+            cx, cz = x + nx * d + nz * t, z + nz * d - nx * t
+            h = rng.uniform(1.6, 3.2) + d * .6
+            c = shade(rng.choice(biomes.STRATA), rng.uniform(.85, 1.05))
+            b.add(rng.choice(('prism6', 'prism5')), (cx, h / 2 - .2, cz), (rng.uniform(1.2, 1.8), h, rng.uniform(1.1, 1.6)),
+                  rot=(rng.uniform(-4, 4), yaw + rng.uniform(0, 60), rng.uniform(-4, 4)), col=c, grad=.4,
+                  cap=(SAND_TOP, .7))
+        if rng.random() < .35:           # blocs éboulés
+            for _ in range(rng.randint(1, 3)):
+                ox = x - nx * rng.uniform(.2, 1.0) + nz * rng.uniform(-1.2, 1.2)
+                oz = z - nz * rng.uniform(.2, 1.0) - nx * rng.uniform(-1.2, 1.2)
+                t = rng.uniform(.35, .7)
+                b.add(rng.choice(ROCKS), (ox, t * .3, oz), (t * 1.6, t * 1.1, t * 1.4), rot=(0, rng.uniform(0, 360), 0),
+                      col=shade(rng.choice(biomes.STRATA), rng.uniform(.8, 1.0)), grad=.3)
+        if rng.random() < .18:           # touffe d'herbe sèche
+            self._tree(b, x - nx * .3, z - nz * .3, rng.uniform(.5, .7), 'dry', biomes.ROCHE)
+
+    def _basalt_wall(self, b, x, z, nx, nz, k):
+        """Paroi de basalte : orgues (colonnes hexagonales) sombres, fissures de lave, arbres calcinés."""
+        rng = self.rng
+        yaw = math.degrees(math.atan2(nx, nz))
+        for j in range(rng.randint(2, 4)):
+            t = rng.uniform(-1.1, 1.1)
+            d = rng.uniform(.4, 1.8)
+            cx, cz = x + nx * d + nz * t, z + nz * d - nx * t
+            h = rng.uniform(1.4, 2.8) + d * .7
+            b.add('prism6', (cx, h / 2 - .2, cz), (rng.uniform(1.0, 1.5), h, rng.uniform(1.0, 1.4)),
+                  rot=(rng.uniform(-5, 5), rng.uniform(0, 60), rng.uniform(-5, 5)),
+                  col=shade(rng.choice(BASALTS), rng.uniform(.85, 1.15)), grad=.4, cap=(ASH_TOP, .5))
+        if rng.random() < .35:           # fissure où la lave affleure, côté passage
+            t = rng.uniform(-.8, .8)
+            b.add('blob', (x + nx * .1 + nz * t, .5, z + nz * .1 - nx * t), (.3, 1.2, .3),
+                  rot=(rng.uniform(-20, 20), yaw, rng.uniform(-25, 25)), col=glowing(biomes.LAVA, .85), wobble=.3)
+        if rng.random() < .3:            # blocs au pied
+            t = rng.uniform(.4, .8)
+            b.add(rng.choice(ROCKS), (x - nx * .4 + nz * rng.uniform(-1, 1), t * .3, z - nz * .4 - nx * rng.uniform(-1, 1)),
+                  (t * 1.6, t * 1.1, t * 1.4), rot=(0, rng.uniform(0, 360), 0), col=shade(BASALT, rng.uniform(.85, 1.1)),
+                  grad=.3)
+        if k % 5 == 0:
+            self._tree(b, x + nx * 1.8, z + nz * 1.8, rng.uniform(1.0, 1.3), 'dead', biomes.FEU)
+
+    def _crystals(self, b, x, z, s, palette=None):
+        """Grappe de cristaux (bleutés par défaut), légèrement lumineux."""
+        rng = self.rng
+        base = rng.choice(palette or CRYSTAL)
+        for i in range(rng.randint(3, 5)):
+            h = rng.uniform(1.0, 2.4) * s * (1.25 if i == 0 else 1)
+            ox, oz = (0, 0) if i == 0 else polar(rng.uniform(0, 360), rng.uniform(.3, .7) * s)
+            b.add('cone6', (x + ox, h * .42, z + oz), (.55 * s, h, .55 * s),
+                  rot=(rng.uniform(-22, 22) if i else 0, rng.uniform(0, 60), rng.uniform(-22, 22) if i else 0),
+                  col=glowing(shade(base, rng.uniform(.9, 1.1)), .35))
+
+    def _grass_clump(self, b, x, z, s, g, mound=False):
+        """Touffe de hautes herbes : longues feuilles courbées qui s'ouvrent en éventail, sombres au
+        pied et claires au bout (comme les cachettes de Pokémon Unite)."""
+        rng = self.rng
+        n = 6
+        a0 = rng.uniform(0, 360)
+        for k in range(n):
+            a = a0 + k * 360 / n + rng.uniform(-22, 22)
+            h = rng.uniform(1.5, 2.1) * s
+            tilt = rng.uniform(14, 34) if k else rng.uniform(0, 8)            # une feuille presque droite
+            rot = (tilt, a, rng.uniform(-10, 10))
+            scale = (rng.uniform(.62, .82), h, rng.uniform(.45, .75) * h)
+            base = _rot_matrix(rot) @ np.array((0, -h / 2, 0))                # pied de la feuille au sol
+            ox, oz = polar(a, rng.uniform(.05, .3))
+            b.add('blade', (x + ox - base[0], -.05 - base[1], z + oz - base[2]), scale, rot=rot,
+                  col=shade(g, rng.uniform(.92, 1.1)), grad=.4, tip=(GRASS_TIP, .7))
+        if mound:                        # masse sombre au pied : la touffe paraît dense
+            b.add('sphere_lo', (x, .2 * s, z), (1.7 * s, .8 * s, 1.7 * s), rot=(0, rng.uniform(0, 90), 0),
+                  col=shade(g, .78), wobble=.2, grad=.4)
 
     def _build_bushes(self):
         """Hautes herbes : touffes de longues feuilles, bien plus hautes que l'herbe des pelouses."""
         b, rng = self.b, self.rng
-        ii, jj = np.nonzero(self.bush_grid)
+        inside = self.bush_grid > 0
+        depth = ndimage.distance_transform_edt(inside) * J_RES       # distance au bord de la touffe
+        ii, jj = np.nonzero(inside & (np.arange(inside.shape[0])[:, None] % 2 == 0)
+                            & (np.arange(inside.shape[1])[None, :] % 2 == 0))
         for i, j in zip(ii, jj):
-            if (i + j) % 2:
-                continue
-            x, z = self.j_min + i * J_RES, self.j_min + j * J_RES
-            g = rng.choice(BUSH_GREENS)
-            for _ in range(2):
-                h = rng.uniform(1.3, 1.9)
-                b.add('cone6', (x + rng.uniform(-.4, .4), h / 2, z + rng.uniform(-.4, .4)), (.5, h, .5),
-                      rot=(rng.uniform(-18, 18), rng.uniform(0, 60), rng.uniform(-18, 18)), col=shade(g, rng.uniform(.9, 1.15)))
-            if i % 4 == 0 and j % 4 == 0:
-                b.add('blob', (x, .35, z), (1.9, .9, 1.9), col=shade(g, .75), wobble=.25, grad=.4)
+            x = self.j_min + i * J_RES + rng.uniform(-.3, .3)
+            z = self.j_min + j * J_RES + rng.uniform(-.3, .3)
+            s = .62 + .38 * _smoothstep(.2, 1.6, depth[i, j])    # plus basses au bord : silhouette arrondie
+            self._grass_clump(b, x, z, s, rng.choice(BUSH_GREENS), mound=(i + j) % 4 == 0)
 
         # herbes et fleurs sur les pelouses
         for _ in range(C.QUALITY['grass']):
@@ -1357,10 +1977,52 @@ class Stadium:
         d = self.cell_centre(i, j) - Vec3(pos.x, 0, pos.z)
         return d.normalized() if d.length() > .01 else Vec3(0, 0, 0)
 
+    def _update_emitters(self, dt, focus):
+        """Particules du décor près de la caméra : écume et bruine au pied des cascades, bulles qui
+        éclatent dans la lave, panache du volcan."""
+        from game.world import fx
+        P = fx.PARTICLES
+        if P is None or focus is None:
+            return
+        rng = random
+        for x, y, z, kind, s in self.emitters:
+            if (x - focus.x) ** 2 + (z - focus.z) ** 2 > 60 ** 2:
+                continue
+            if kind == 'fall':
+                if rng.random() < 18 * dt * s:
+                    P.emit((x + fx.rnd(.8 * s), y + .2, z + fx.rnd(.8 * s)), fx.MIST, size=1.6 * s, life=1.2,
+                           vel=(fx.rnd(.6), fx.ru(.6, 1.4), fx.rnd(.6)), grow=2.2, tex='smoke', blend='alpha', alpha=.35)
+                if rng.random() < 30 * dt * s:
+                    fx.droplet(P, (x + fx.rnd(.6 * s), y + .1, z + fx.rnd(.6 * s)),
+                               (fx.rnd(1.8), fx.ru(2, 4), fx.rnd(1.8)), s=.18, life=.5)
+                if rng.random() < 5 * dt * s:
+                    fx.ground_ring(P, (x + fx.rnd(.8 * s), y + .06, z + fx.rnd(.8 * s)), (.9, .97, 1), .3, 1.6 * s, .9,
+                                   alpha=.55, blend='alpha')
+            elif kind == 'lava':
+                if rng.random() < 2.5 * dt * s:
+                    a, r = rng.uniform(0, math.tau), rng.uniform(0, s)
+                    bx, bz = x + math.sin(a) * r, z + math.cos(a) * r
+                    P.emit((bx, y + .1, bz), (1, .75, .25), size=.6, life=.35, grow=1.8)
+                    for _ in range(4):
+                        fx.spark(P, (bx, y + .15, bz), (fx.rnd(1.5), fx.ru(2, 4), fx.rnd(1.5)), s=.1, life=.6,
+                                 gravity=8)
+                    if rng.random() < .5:
+                        fx.smoke(P, (bx, y + .3, bz), (0, 1, 0), s=.9, life=1.2, alpha=.25)
+            elif kind == 'volcano':
+                if rng.random() < 6 * dt:
+                    fx.smoke(P, (x + fx.rnd(1), y + .5, z + fx.rnd(1)), (fx.rnd(.5) + .4, fx.ru(2.5, 4), fx.rnd(.5)),
+                             s=3.2, life=4, alpha=.45, col=(.26, .24, .23), col2=(.5, .48, .47))
+                if rng.random() < 10 * dt:
+                    fx.spark(P, (x + fx.rnd(1.2), y + .3, z + fx.rnd(1.2)), (fx.rnd(2), fx.ru(5, 9), fx.rnd(2)),
+                             s=.14, life=1.4, gravity=5)
+
     def in_river(self, x, z):
         i, j = self.cell_of(x, z)
         return bool(self.river[i, j])
 
     def update(self, dt, focus=None):
-        for f in self.flows:
-            f.update(dt, focus)
+        self.time += dt
+        set_time(self.water_node, self.time)
+        self._update_emitters(dt, focus)
+        self.vortex.set_h(self.vortex.get_h() + dt * 30)
+        self.arcs.update(dt)

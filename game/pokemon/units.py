@@ -13,27 +13,32 @@ l'état reçu (voir netsync.py), sauf son propre Pokémon qu'il déplace lui-mê
 import math
 import random
 
-from ursina import Entity, Text, Vec3, Vec4, color, held_keys
+from ursina import Vec3, Vec4, color, held_keys
 
 from game import config as C
-from game.pokemon.combat import Projectile, Wave, Zone, cast_special, flat
+from game.pokemon.combat import Beam, Projectile, Wave, Zone, cast_special, flat, heal_area
 from game.pokemon.creatures import Creature
+from game.pokemon.healthbar import HealthBar
+from game.world import fx
 from game.world.fx import burst
 from game.world.geometry import flat_circle
 
 STATUS_COLOR = {'burn': color.rgb(1, .5, .15), 'slow': color.rgb(.55, .9, 1), 'stun': color.rgb(1, .95, .3)}
 LOCAL_BAR = color.rgb(.3, .95, .35)          # barre de vie de son propre Pokémon
 ALLY_BAR = color.rgb(.35, .9, 1)             # barre de vie de l'autre joueur humain
+LOCAL_BADGE = color.rgb(1, .62, .15)         # badge de niveau de son propre Pokémon
 
 
 class Unit:
     def __init__(self, match, species, team, pos, role=None, human=None, local=False, camp=None):
         self.match = match
-        self.species = species
+        self.species = species            # lignée (Pokémon choisi) : 'pikachu', 'salameche'...
+        self.form = species               # forme actuelle (évolue avec le niveau) : 'raichu'...
         self.data = C.SPECIES[species]
         self.name = self.data['name']
         self.type = self.data['type']
         self.team = team                  # 'rouge', 'bleu' ou None (neutre)
+        self.trait = C.TRAITS[species][0] if team and species in C.TRAITS else None   # talent de la lignée
         self.role = role
         self.human = human                # None (IA) ou numéro du joueur humain (0 : hôte, 1 : invité)
         self.is_player = human is not None
@@ -58,14 +63,11 @@ class Unit:
         if self.is_player:
             bar_col = LOCAL_BAR if local else ALLY_BAR
         w = 1.6 if self.data['hp'] < 1000 else 3.2
-        self.bar = Entity(parent=self.creature, y=h, billboard=True)
-        Entity(parent=self.bar, model='quad', color=color.rgba(0, 0, 0, .7), scale=(w + .1, .24))
-        self.bar_fill = Entity(parent=self.bar, model='quad', color=bar_col, origin=(-.5, 0),
-                               position=(-w / 2, 0, -.01), scale=(w, .16))
-        self.bar_w = w
+        badge = LOCAL_BADGE if local else bar_col
+        label = f'J{human + 1}' if self.is_player and not local else None   # nom du Pokémon de l'autre joueur
+        self.hb = HealthBar(self.creature, h, w, bar_col, badge, label, ALLY_BAR)
+        self.bar = self.hb.root
         self.ring = getattr(self, 'ring', None)
-        if self.is_player and not local:          # nom au-dessus du Pokémon de l'autre joueur
-            Text(parent=self.bar, text=f'J{human + 1}', y=.42, z=-.02, origin=(0, 0), scale=12, color=ALLY_BAR)
         self.reset()
 
     # ------------------------------------------------------------ état
@@ -137,12 +139,52 @@ class Unit:
     def has(self, buff):
         return self.buffs.get(buff, 0) > 0
 
+    def _aura(self, trait):
+        """Vrai si un Pokémon de l'équipe ayant ce talent d'aura (lui compris) est tout près."""
+        for a in self.match.auras.get(self.team, ()):
+            if a.trait == trait and a.alive and (flat(a.position - self.position)).length() < C.AURA_RANGE:
+                return True
+        return False
+
+    def hp_ratio(self):
+        return self.hp / self.max_hp if self.max_hp else 0
+
+    # ------------------------------------------------------------ terrain
+    def zone(self):
+        """Terrain où se trouve le Pokémon : type de l'arène, 'riviere' ou None (recalculé 1 fois / image)."""
+        t = self.match.time
+        if getattr(self, '_zone_t', None) != t:
+            p = self.position
+            a = self.match.arena_at(p)
+            # dans l'eau (pas sur un pont : le tablier est au-dessus du niveau du sol)
+            wet = p.y < 0 and self.match.stadium.in_river(p.x, p.z)
+            self._zone = a['type'] if a is not None else 'riviere' if wet else None
+            self._zone_t = t
+        return self._zone
+
+    def zone_mod(self, key):
+        """Effet du terrain sur ce Pokémon (voir C.ZONE_EFFECTS) : 'dmg', 'taken' ou 'speed'."""
+        z = self.zone()
+        return C.zone_effect(z, self.type).get(key, 0.0) if z else 0.0
+
     def damage_mult(self):
         m = 1 + C.LEVEL_BONUS * (self.level - 1)
         if self.has('braise'):
             m *= 1.25
         if self.has('psy'):
             m *= 1.2
+        t = self.trait
+        if t is not None:                                    # talents
+            r = self.hp_ratio()
+            if (t == 'Brasier' and r < .4) or (t == 'Cran' and r < .5):
+                m *= 1.25 if t == 'Brasier' else 1.3
+            elif t == 'Éruption' and r > .7:
+                m *= 1.2
+            if self.has('impudence'):
+                m *= 1.25
+        if self.team and self._aura('Plus'):
+            m *= 1.1
+        m *= 1 + self.zone_mod('dmg')
         return m * (1 + self.match.team_bonus(self.team, 'damage'))
 
     def defense_mult(self):
@@ -151,6 +193,13 @@ class Unit:
             m *= .75
         if self.has('psy'):
             m *= .8
+        if self.trait == 'Fermeté':
+            m *= .85
+        elif self.trait == 'Multiécaille' and self.hp_ratio() > .8:
+            m *= .7
+        if self.team and self._aura('Écran Neige'):
+            m *= .9
+        m *= 1 + self.zone_mod('taken')
         return m * (1 - self.match.team_bonus(self.team, 'defense'))
 
     def cooldown_mult(self):
@@ -161,14 +210,28 @@ class Unit:
         s = self.data['speed'] * (1 + self.match.team_bonus(self.team, 'speed'))
         if self.status['slow'] > 0:
             s *= .55
-        if self.type == 'eau' and self.match.stadium.in_river(self.position.x, self.position.z):
-            s *= 1.05
+        s *= 1 + self.zone_mod('speed')                 # terrain : rivière, arène d'un autre type...
+        if self.trait == 'Torrent' and self.zone() == 'riviere':
+            s *= 1.1
+        if self.trait == 'Engrais' and self.bush:
+            s *= 1.3
         return s
+
+    def regen(self):
+        """PV rendus par seconde (hors base) : récupération, bonus et talents."""
+        r = 1.0 if self.team else 0
+        if self.has('flux'):
+            r += 4
+        if self.trait == 'Photosynthèse':
+            r += 3
+        elif self.trait == 'Torrent' and self.zone() == 'riviere':
+            r += 4
+        return r + self.match.team_bonus(self.team, 'regen')
 
     # ------------------------------------------------------------ PV
     def _refresh_bar(self):
-        ratio = max(0, self.hp / self.max_hp)
-        self.bar_fill.scale_x = self.bar_w * ratio
+        self.hb.set(self.hp, self.max_hp)
+        self.hb.set_level(self.level)
 
     def heal(self, amount):
         if not self.alive:
@@ -212,8 +275,8 @@ class Unit:
         if self.level >= C.MAX_LEVEL or self.team is None:
             return
         self.xp += amount
-        while self.level < C.MAX_LEVEL and self.xp >= self.level * C.XP_PER_LEVEL:
-            self.xp -= self.level * C.XP_PER_LEVEL
+        while self.level < C.MAX_LEVEL and self.xp >= C.xp_to_next(self.level):
+            self.xp -= C.xp_to_next(self.level)
             ratio = self.hp / self.max_hp
             self.level += 1
             self.hp = self.max_hp * ratio + self.data['hp'] * C.LEVEL_BONUS
@@ -222,9 +285,78 @@ class Unit:
             if self.alive:
                 self.level_fx()
             self.match.on_level_up(self)
+            self.check_evolution()
 
     def level_fx(self):
         burst(self.match.root, self.position + Vec3(0, 1, 0), color.rgb(1, .95, .5), n=10, speed=3, size=.2)
+
+    # ------------------------------------------------------------ évolution
+    def check_evolution(self, show=True):
+        """Prend la forme correspondant au niveau (évolution, ou retour à la forme de base quand
+        une nouvelle partie commence)."""
+        if not self.team or self.species not in C.EVOLUTIONS:
+            return
+        form = C.form_for(self.species, self.level)
+        if form != self.form:
+            old = self.name
+            self._set_form(form)
+            up = show and C.evolution_line(self.species).index(form) > 0
+            if up and self.alive:
+                self._evolution_fx()
+            self.match.on_evolve(self, old if up else None)
+
+    def _set_form(self, form):
+        """Remplace le modèle 3D et les caractéristiques par celles de la nouvelle forme."""
+        from ursina import destroy
+        ratio = max(0.0, self.hp / self.max_hp)
+        old = self.creature
+        self.form = form
+        self.data = C.SPECIES[form]
+        self.name, self.type, self.radius = self.data['name'], self.data['type'], self.data['radius']
+        c = Creature(form, parent=self.match.root, position=old.position, scale=self.data['scale'])
+        c.rotation_y = old.rotation_y
+        self.bar.parent = c
+        self.bar.y = self.data['scale'] * 1.5 + .5
+        if self.ring is not None:
+            destroy(self.ring)
+            tc = C.TEAMS[self.team]['color']
+            self.ring = flat_circle(c, self.radius + .35, color.rgba(tc[0], tc[1], tc[2], .75), y=.05)
+        if not self.alive:
+            c.knock_out()
+        c.enabled, c.visible = old.enabled, old.visible
+        self.creature = c
+        destroy(old)
+        veiled, self.veiled = self.veiled, False
+        self.set_veiled(veiled)
+        self.hp = self.max_hp * ratio if self.alive else 0
+        self._refresh_bar()
+        if hasattr(self.brain, 'set_form'):
+            self.brain.set_form()
+
+    def _evolution_fx(self):
+        """Évolution : la silhouette devient blanche et lumineuse, grandit d'un coup, et une colonne
+        de lumière monte dans une pluie d'étoiles."""
+        c, s = self.creature, self.data['scale']
+        c.hit_flash(Vec4(1, 1, 1, 1), .7)
+        c.pivot.scale = s * .6
+        c.pivot.animate_scale(s * 1.12, duration=.35)
+        c.pivot.animate_scale(s, duration=.25, delay=.35)
+        P = fx.PARTICLES
+        if P is None or (flat(self.position) - flat(self.match.cam_target)).length() > 60:
+            return
+        p = self.position
+        col = C.TYPES[self.type]['light']
+        fx.ground_ring(P, (p.x, p.y + .1, p.z), (1, 1, .9), .5, 5, .7, alpha=.9)
+        fx.ground_glow(P, (p.x, p.y, p.z), col, 3.5, .9, alpha=.5)
+        P.emit((p.x, p.y + 1.2 * s, p.z), (1, 1, .95), size=4.5 * s, life=.35, grow=1.6, alpha=.75)
+        P.emit((p.x, p.y + 3, p.z), (1, .98, .85), size=2.2, life=.9, vel=(0, 5, 0), tex='streak', mode='stretch',
+               stretch=.8, alpha=.6)
+        for i in range(36):
+            a = math.tau * i / 36
+            r = random.uniform(.3, 1.2) * s
+            P.emit((p.x + math.sin(a) * r, p.y + random.uniform(.2, 1.8) * s, p.z + math.cos(a) * r), (1, 1, .9),
+                   col2=(col[0], col[1], col[2]), size=random.uniform(.25, .5), life=random.uniform(.8, 1.4),
+                   vel=(math.sin(a) * 1.5, random.uniform(2, 5), math.cos(a) * 1.5), tex='star', spin=fx.rnd(5))
 
     # ------------------------------------------------------------ actions
     def move(self, direction, dt, factor=1.0):
@@ -255,8 +387,10 @@ class Unit:
             if not self.is_player and a['kind'] == 'ranged':
                 # l'IA anticipe (plus ou moins bien) le déplacement de sa cible, avec une erreur de visée
                 t = d.length() / a['speed']
-                d = d + target.vel * t * random.uniform(.2, .9)
-                ang = math.atan2(d.x, d.z) + math.radians(random.uniform(-C.AIM_ERROR, C.AIM_ERROR))
+                lead = getattr(self.brain, 'lead', (.2, .9))          # l'IA experte vise mieux
+                err = getattr(self.brain, 'aim_error', C.AIM_ERROR)
+                d = d + target.vel * t * random.uniform(*lead)
+                ang = math.atan2(d.x, d.z) + math.radians(random.uniform(-err, err))
                 d = Vec3(math.sin(ang), 0, math.cos(ang))
             d = d.normalized() if d.length() > .01 else self.facing()
         else:
@@ -271,9 +405,14 @@ class Unit:
             self.creature.pivot.rotation_x = -15
             return True
         start = self.position + Vec3(0, .9 * min(2, self.data['scale']), 0) + d * (self.radius + .3)
+        status, stun = a.get('status'), 0.0
+        if self.trait == 'Corps Gel':                       # talents qui touchent l'attaque de base
+            status = ('slow', 1.0)
+        elif self.trait == 'Statik' and random.random() < .2:
+            stun = .5
         self.match.projectiles.append(Projectile(
             self.match, self, start, d * a['speed'], a['damage'], a['size'], a['color'],
-            shape=a.get('shape', 'sphere'), life=(a['range'] + 4) / a['speed'], status=a.get('status')))
+            shape=a.get('shape', 'sphere'), life=(a['range'] + 4) / a['speed'], status=status, stun=stun))
         return True
 
     def try_special(self, target):
@@ -293,6 +432,8 @@ class Unit:
 
     # ------------------------------------------------------------ boucle
     def update(self, dt):
+        self.hb.tick(dt)
+        self.hb.set_level(self.level)         # le niveau peut aussi changer par le réseau ou une nouvelle partie
         if not self.match.authority:
             self.update_view(dt)
             return
@@ -309,12 +450,7 @@ class Unit:
         for k in self.status:
             self.status[k] = max(0, self.status[k] - dt)
 
-        if self.team:
-            self.gain_xp(C.XP_PASSIVE * dt)
-        regen = 1.0 if self.team else 0
-        if self.has('flux'):
-            regen += 4
-        regen += self.match.team_bonus(self.team, 'regen')
+        regen = self.regen()
         if regen and self.hp < self.max_hp:
             self.heal(regen * dt)
         if self.status['burn'] > 0:
@@ -334,11 +470,12 @@ class Unit:
                 self.move(self.charge_dir, dt, self.charge_speed / max(1, self.speed()))
             self.creature.pivot.rotation_x += dt * 900
             moving = True
+            self._roll_dust()
             for u in self.match.units:
                 if u.alive and id(u) not in self.charge_hit and self.match.hostile(self, u):
                     if (flat(u.position - self.position)).length() < self.radius + u.radius + .4:
                         self.charge_hit.add(id(u))
-                        self.match.deal_damage(self, u, self.charge_dmg)
+                        self.match.deal_damage(self, u, self.charge_dmg, contact=True)
             if self.charge_t <= 0:
                 self.creature.pivot.rotation_x = 0
         elif self.status['stun'] > 0:
@@ -362,16 +499,37 @@ class Unit:
     def revealed(self):
         """Vrai s'il vient d'attaquer ou d'être touché : l'herbe ne le cache plus."""
         r = C.BUSH['reveal']
+        if self.trait == 'Spectral':                       # attaquer ne le trahit pas
+            return self.match.time - self.last_hit_t < r
         return self.attack_anim > -r or self.match.time - self.last_hit_t < r
 
     def _status_fx(self, dt):
         self._fx_t -= dt
-        if self._fx_t <= 0 and not self.veiled:
-            self._fx_t = .15
+        if self._fx_t <= 0 and not self.veiled and fx.PARTICLES:
+            self._fx_t = .07
+            P, p, s = fx.PARTICLES, self.position, self.data['scale']
             for k, v in self.status.items():
-                if v > 0:
-                    burst(self.match.root, self.position + Vec3(0, 1.2 * self.data['scale'], 0), STATUS_COLOR[k],
-                          n=1, speed=1, size=.15)
+                if v <= 0:
+                    continue
+                if k == 'burn':               # petites flammes qui lèchent le Pokémon
+                    fx.flame(P, (p.x + fx.rnd(.4 * s), p.y + fx.ru(.3, 1.1) * s, p.z + fx.rnd(.4 * s)),
+                             (0, 1.2, 0), s=.45 * s, life=.4, rise=2)
+                elif k == 'slow':             # givre : flocons et buée froide
+                    P.emit((p.x + fx.rnd(.6 * s), p.y + fx.ru(.2, 1.3) * s, p.z + fx.rnd(.6 * s)), (.85, .97, 1),
+                           size=.22, life=.6, vel=(0, -.4, 0), tex='star', spin=fx.rnd(3))
+                else:                         # étourdi : étoiles qui tournent au-dessus de la tête
+                    a = self.match.time * 6
+                    for j in range(3):
+                        b = a + j * math.tau / 3
+                        P.emit((p.x + math.sin(b) * .5 * s, p.y + 1.45 * s, p.z + math.cos(b) * .5 * s),
+                               STATUS_COLOR[k], size=.3, life=.12, tex='star')
+
+    def _roll_dust(self):
+        """La roulade soulève la poussière."""
+        if fx.PARTICLES and random.random() < .7:
+            p = self.position
+            fx.smoke(fx.PARTICLES, (p.x, p.y + .2, p.z), (fx.rnd(1), .6, fx.rnd(1)), s=1.2, life=.6, alpha=.35,
+                     col=fx.DUST, col2=(.78, .72, .64))
 
     def _finish_frame(self, dt, moving):
         self.moving = moving
@@ -393,6 +551,7 @@ class Unit:
         if not self.local:
             if self.charge_t > 0:
                 self.creature.pivot.rotation_x += dt * 900
+                self._roll_dust()
             elif self.status['stun'] > 0:
                 self.creature.pivot.rotation_z = math.sin(self.match.time * 60) * 6
             self.creature.animate(dt, self.moving, self.attack_anim > 0)
@@ -405,6 +564,7 @@ class Unit:
             self.move(self.charge_dir, dt, self.charge_speed / max(1, self.speed()))
             self.creature.pivot.rotation_x += dt * 900
             moving = True
+            self._roll_dust()
             if self.charge_t <= 0:
                 self.creature.pivot.rotation_x = 0
         elif self.status['stun'] > 0:
@@ -429,7 +589,7 @@ class PlayerBrain:
 
     def __init__(self, unit, match):
         self.u, self.m = unit, match
-        self.moves = C.MOVESETS[unit.species]
+        self.moves = C.moves_for(unit.species, unit.form)
         self.cd = {mv['key']: 0.0 for mv in self.moves}
         self.dash_cd = 0.0
         self.dash_t = 0.0
@@ -441,6 +601,10 @@ class PlayerBrain:
 
     def on_hit(self, source):
         pass
+
+    def set_form(self):
+        """Évolution : nouvelles attaques (les temps de recharge en cours sont conservés)."""
+        self.moves = C.moves_for(self.u.species, self.u.form)
 
     def world_input(self):
         v = input_vector()
@@ -463,6 +627,11 @@ class PlayerBrain:
     def use(self, mv):
         u, m = self.u, self.m
         if not u.can_act() or self.rush_t > 0 or self.dash_t > 0:
+            return
+        if mv.get('locked'):
+            if u.local:
+                m.game.banner.show(f"{mv['name']} : débloquée au niveau {mv['unlock']} (évolution)", 1.5,
+                                   text_color=color.rgb(.8, .85, 1))
             return
         kind = mv['kind']
         if kind == 'basic':
@@ -502,6 +671,21 @@ class PlayerBrain:
         elif kind == 'special' and u.data['special']['kind'] == 'charge':
             sp = u.data['special']
             u.start_charge(d, sp['speed'], sp['duration'], 0)
+        elif kind == 'blink':                         # l'invité se téléporte tout de suite
+            u.position = self._blink_target(mv, d)
+
+    def _blink_target(self, mv, d):
+        """Arrivée d'une téléportation : droit devant, sans traverser les murs."""
+        u, st = self.u, self.m.stadium
+        here = flat(u.position)
+        dest = st.reach(here, here + d * mv['distance'])
+        if (dest - here).length() > 1.2:
+            dest -= d * .8                            # on s'arrête avant le mur
+        else:
+            dest = here
+        p = st.collide(Vec3(dest.x, 0, dest.z), u.radius)
+        p.y = st.walk_y(p.x, p.z)
+        return p
 
     def _perform(self, mv, d):
         u, m, kind = self.u, self.m, mv['kind']
@@ -512,8 +696,14 @@ class PlayerBrain:
             u.invuln = max(u.invuln, mv['duration'] + .1 + self.slack)
         elif kind == 'strike':
             p = self.target.position if self.target is not None else u.position + d * 7
+            p = m.stadium.reach(u.position, p)            # pas de frappe au cœur d'un mur
             m.hazards.append(Zone(m, u, p, mv['radius'], mv['delay'], mv['damage'], mv['color'],
-                                  status=mv.get('status'), style=mv.get('style', 'explosion')))
+                                  status=mv.get('status'), style=mv.get('style', 'explosion'),
+                                  stun=mv.get('stun', 0.0)))
+        elif kind == 'beam':
+            m.hazards.append(Beam(m, u, u.position + d * u.radius, d, mv['length'], mv['width'], mv['delay'],
+                                  mv['damage'], mv['color'], mv.get('status')))
+            u.channel = mv['delay'] + .35
         elif kind == 'homing':
             m.projectiles.append(Projectile(m, u, start, d * mv['speed'], mv['damage'], mv['size'], mv['color'],
                                             shape=mv.get('shape', 'sphere'), homing=self.target, turn=.8, life=1.8,
@@ -526,6 +716,15 @@ class PlayerBrain:
             for p in m.projectiles:     # l'onde renvoie les projectiles proches
                 if p.owner is not u and m.hostile(p.owner, u) and (flat(p.e.position - u.position)).length() < mv['radius']:
                     p.kill()
+        elif kind == 'blink':                         # téléportation : disparaît puis frappe à l'arrivée
+            p = self._blink_target(mv, d)
+            fx.impact(u.type, u.position + Vec3(0, 1, 0), .5)
+            if not u.net_driven:
+                u.position = p
+            u.invuln = max(u.invuln, .25 + self.slack)
+            m.hazards.append(Wave(m, u, p, 22, mv['radius'], mv['damage'], mv['color'], start=.5))
+        elif kind == 'heal':
+            heal_area(m, u, mv['heal'], mv['radius'], mv['color'])
         elif kind == 'special':
             if self.aim is not None:
                 u.face(self.aim)
@@ -537,9 +736,9 @@ class PlayerBrain:
             return
         d = self.world_input()
         self.dash_dir = d if d.length() else u.facing()
-        self.dash_t = C.PLAYER_DASH['time']
+        self.dash_t = C.PLAYER_DASH['time'] * (2 if u.trait == 'Téléport' else 1)   # talent : esquive longue
         self.dash_cd = C.PLAYER_DASH['cooldown']
-        u.invuln = max(u.invuln, C.PLAYER_DASH['time'] + .08)
+        u.invuln = max(u.invuln, self.dash_t + .08)
         u.face(self.dash_dir)
         if not self.m.authority:
             self.m.net.send_dash()
@@ -558,7 +757,8 @@ class PlayerBrain:
             t = self.m.blind_target(self.u, self.u.radius + .5, None)
         if t is not None and t.alive and (flat(t.position - self.u.position)).length() < self.u.radius + t.radius + .5:
             if self.m.authority:
-                self.m.deal_damage(self.u, t, self.rush_move['damage'])
+                mv = self.rush_move
+                self.m.deal_damage(self.u, t, mv['damage'], mv.get('status'), mv.get('stun', 0.0), contact=True)
             self.rush_t = 0
 
     def update(self, dt):
@@ -574,14 +774,26 @@ class PlayerBrain:
             d = self._dir_to_target()
             u.face(d)
             u.move(d, dt, self.rush_move['speed'] / u.speed())
-            burst(m.root, u.position + Vec3(0, .6, 0), color.white, n=1, speed=.5, size=.2, life=.2)
+            if fx.PARTICLES:                                  # traits de vitesse et poussière
+                p = u.position
+                fx.PARTICLES.emit((p.x + fx.rnd(.3), p.y + fx.ru(.3, 1.2), p.z + fx.rnd(.3)), (1, 1, 1),
+                                  size=.12, life=.18, vel=(-d.x * 14, 0, -d.z * 14), mode='stretch', stretch=.03,
+                                  alpha=.7)
+                fx.smoke(fx.PARTICLES, (p.x, p.y + .2, p.z), (-d.x, .4, -d.z), s=.8, life=.4, alpha=.25,
+                         col=fx.DUST, col2=(.8, .76, .7))
             self._rush_contact()
             return True
         if self.dash_t > 0:                                  # esquive
             self.dash_t -= dt
             u.move(self.dash_dir, dt, C.PLAYER_DASH['speed'] / u.speed())
-            if random.random() < .6:
-                burst(m.root, u.position + Vec3(0, .5, 0), color.rgb(1, .95, .5), n=1, speed=.5, size=.2, life=.25)
+            if fx.PARTICLES:                                  # esquive : traînée lumineuse et poussière
+                p = u.position
+                fx.PARTICLES.emit((p.x, p.y + .7, p.z), (1, .95, .6), size=.35, life=.2,
+                                  vel=(-self.dash_dir.x * 8, 0, -self.dash_dir.z * 8), mode='stretch', stretch=.04,
+                                  alpha=.6)
+                if random.random() < .5:
+                    fx.smoke(fx.PARTICLES, (p.x, p.y + .2, p.z), (0, .5, 0), s=.7, life=.4, alpha=.22,
+                             col=fx.DUST, col2=(.8, .76, .7))
             return True
         u.move(move, dt)
         if held_keys['j']:
@@ -651,7 +863,8 @@ class RemotePlayerBrain(PlayerBrain):
             self.aim = None
 
     def remote_dash(self):
-        self.u.invuln = max(self.u.invuln, C.PLAYER_DASH['time'] + .08 + self.slack)
+        k = 2 if self.u.trait == 'Téléport' else 1
+        self.u.invuln = max(self.u.invuln, C.PLAYER_DASH['time'] * k + .08 + self.slack)
 
     def update(self, dt):
         for k in self.cd:
@@ -677,6 +890,7 @@ class BotBrain:
         self.wander_t = 0
         self.strafe = random.choice((-1, 1))
         self.stuck_t = 0
+        self.blind = 0.0            # temps passé sans voir sa cible (mur entre les deux)
 
     def on_hit(self, source):
         if source is not None and source.alive and self.mode != 'retreat' and self.target is None:
@@ -699,7 +913,7 @@ class BotBrain:
         for e in m.units:
             if e.alive and e.team and e.team != u.team and e not in m.hidden[u.team]:
                 d = (flat(e.position - u.position)).length()
-                if d < self.AGGRO:
+                if d < self.AGGRO and m.can_see(u, e):
                     s = d + 12 * e.hp / e.max_hp
                     if s < score:
                         best, score = e, s
@@ -739,6 +953,14 @@ class BotBrain:
             to_t = flat(t.position - u.position)
             d = to_t.length()
             dirn = to_t.normalized() if d > .01 else u.facing()
+            if not m.can_see(u, t):                   # un mur les sépare : on contourne, sans tirer
+                self.blind += dt
+                if self.blind > 2.0:                  # toujours caché : on laisse tomber
+                    self.target, self.blind = None, 0.0
+                moved = u.move(dirn, dt)
+                u.face(dirn, dt, 14)
+                return moved
+            self.blind = 0.0
             rng = u.data['attack']['range'] + t.radius
             moved = False
             if d > rng * .85:
@@ -825,9 +1047,12 @@ class NeutralBrain:
             dirn = to_t.normalized() if d > .01 else u.facing()
             rng = u.data['attack']['range'] + t.radius
             moved = False
-            if d > rng * .85 and (flat(u.position) - u.home).length() < leash:
+            sees = m.can_see(u, t)
+            if (d > rng * .85 or not sees) and (flat(u.position) - u.home).length() < leash:
                 moved = u.move(dirn, dt)
             u.face(dirn, dt, 10)
+            if not sees:                              # pas d'attaque à travers les murs
+                return moved
             if d < rng:
                 u.basic_attack(t)
             sp = u.data.get('special')

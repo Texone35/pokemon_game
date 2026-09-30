@@ -62,16 +62,40 @@ uniform vec3 cam_pos;
 uniform vec4 flash;
 uniform float emissive;
 uniform float shadow_texel;
+uniform float detail;
 in vec4 v_color;
 in vec3 v_normal;
 in vec3 v_world;
 in vec4 v_shadow;
 out vec4 frag;
+float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
+}
 void main() {
     vec4 base = v_color * p3d_ColorScale;
+    if (detail > 0.0) {
+        // grain du sol et de la roche : taches larges, moyennes et fines (position dans le monde)
+        vec2 q = v_world.xz + vec2(v_world.y * 0.7, -v_world.y * 0.5);
+        float nd = (vnoise(q * 0.3) - 0.5) * 0.2 + (vnoise(q * 1.6) - 0.5) * 0.14 + (vnoise(q * 6.5) - 0.5) * 0.1;
+        base.rgb *= 1.0 + detail * nd;
+        // style peint : grandes zones plus chaudes ou plus froides, touches de pinceau étirées
+        float warm = vnoise(q * 0.05 + 3.1);
+        base.rgb = mix(base.rgb, base.rgb * vec3(1.12, 1.03, 0.8), detail * smoothstep(0.5, 0.85, warm) * 0.7);
+        base.rgb = mix(base.rgb, base.rgb * vec3(0.86, 0.97, 1.1), detail * smoothstep(0.5, 0.15, warm) * 0.6);
+        float stroke = vnoise(vec2(q.x * 1.3 + q.y * 0.5, q.y * 0.45 - q.x * 0.2));
+        base.rgb *= 1.0 + detail * (stroke - 0.5) * 0.08;
+    }
+    // alpha > 1 dans la couleur d'un sommet : partie lumineuse (lave, cristaux...)
+    float vglow = clamp(v_color.a - 1.0, 0.0, 1.0);
     vec3 n = normalize(v_normal);
     vec3 L = -normalize(light_dir);
-    float ndl = max(dot(n, L), 0.0);
+    // décor (detail > 0) : lumière enveloppante, plus douce qu'un éclairage réaliste
+    float paint = step(0.001, detail);
+    float nl = dot(n, L);
+    float ndl = mix(max(nl, 0.0), clamp((nl + 0.45) / 1.45, 0.0, 1.0), paint);
     // ombre douce : 4 echantillons filtres autour du point
     float sh = 0.0;
     vec4 sc = v_shadow;
@@ -83,16 +107,18 @@ void main() {
     sh += textureProj(p3d_LightSource[0].shadowMap, sc + vec4( o.x,  o.y, 0.0, 0.0));
     sh *= 0.25;
     vec3 ambient = mix(ground_color.rgb, sky_color.rgb, n.y * 0.5 + 0.5);
-    vec3 lit = base.rgb * (ambient + ndl * sh * sun_color.rgb);
+    ambient = mix(ambient, ambient * vec3(0.92, 1.0, 1.14), paint);            // ombres légèrement bleutées
+    vec3 sun = sun_color.rgb * mix(vec3(1.0), vec3(1.08, 1.0, 0.84), paint);  // soleil plus chaud
+    vec3 lit = base.rgb * (ambient + ndl * sh * sun);
     vec3 V = normalize(cam_pos - v_world);
     float rim = pow(1.0 - max(dot(n, V), 0.0), 3.0) * 0.16;
     lit += rim * sky_color.rgb * (0.35 + 0.65 * sh);
-    lit = mix(lit, base.rgb, emissive);
+    lit = mix(lit, base.rgb, max(emissive, vglow));
     lit = mix(lit, flash.rgb, flash.a);
     float d = length(v_world - cam_pos);
     float f = clamp((d - fog_range.x) / (fog_range.y - fog_range.x), 0.0, 1.0);
     lit = mix(lit, fog_color.rgb, f * fog_color.a);
-    frag = vec4(lit, base.a);
+    frag = vec4(lit, min(base.a, 1.0));
 }
 """,
     # seules les entrées propres à chaque entité sont ici ; l'ambiance est
@@ -100,6 +126,7 @@ void main() {
     default_input={
         'flash': Vec4(1, 1, 1, 0),
         'emissive': 0.0,
+        'detail': 0.0,
     },
 )
 
@@ -245,6 +272,34 @@ def _cylinder(seg=12, top_radius=.5, bottom_radius=.5):
     return np.array(v, float), np.array(t, int), np.array(n, float)
 
 
+def _blade(rows=(0.0, .4, .75, 1.0)):
+    """Longue feuille d'herbe : effilée, pliée en V au milieu et courbée vers +z (hauteur 1,
+    de y = -.5 à .5 ; l'échelle z règle la courbure). Peu de triangles : on en pose des milliers."""
+    v = []
+    for t in rows:
+        w = .5 * (1 - t) ** .55                    # demi-largeur : feuille pleine, pointe au sommet
+        y, z = t - .5, t * t
+        v += [(-w, y, z), (0, y, z - .12 * w), (w, y, z)]
+    v = np.array(v, float)
+    t = []
+    for r in range(len(rows) - 1):
+        l0, l1 = 3 * r, 3 * r + 3
+        t += [l0, l0 + 1, l1 + 1, l0, l1 + 1, l1, l0 + 1, l0 + 2, l1 + 2, l0 + 1, l1 + 2, l1 + 1]
+    t = np.array(t, int)
+    n = np.zeros_like(v)
+    tri = t.reshape(-1, 3)
+    fn = np.cross(v[tri[:, 1]] - v[tri[:, 0]], v[tri[:, 2]] - v[tri[:, 0]])
+    for k in range(3):
+        np.add.at(n, tri[:, k], fn)
+    n /= np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9)
+    n[-3:] = n[-6:-3]                              # la pointe (triangles plats) prend la normale voisine
+    # normales tournées vers le ciel (face intérieure de la courbure, penchées vers le haut) :
+    # l'herbe prend la lumière du soleil de façon douce et régulière, sans faces noires
+    n = -n + np.array((0, 1.3, 0))
+    n /= np.linalg.norm(n, axis=1, keepdims=True)
+    return v, t, n
+
+
 def _ring(seg=32, inner=.4):
     """Mur circulaire (anneau épais) de hauteur 1, rayon extérieur .5."""
     v, n, t = [], [], []
@@ -309,8 +364,65 @@ PRIMS = {
     'ring_97': _ring(96, .485),     # anneaux très fins pour les grands rayons (tribunes)
     'ring_99': _ring(128, .495),
     'disc': _cylinder(48),
+    'blade': _blade(),               # feuille des hautes herbes
 }
 PRIMS = {k: _outward(p) for k, p in PRIMS.items()}
+
+
+def _faceted(prim):
+    """Version à facettes (une normale par triangle) : rochers et prismes aux arêtes nettes."""
+    v, t, n = prim
+    tri = t.reshape(-1, 3)
+    pv = v[tri].reshape(-1, 3)
+    a, b, c = v[tri[:, 0]], v[tri[:, 1]], v[tri[:, 2]]
+    fn = np.cross(b - a, c - a)
+    fn /= np.maximum(np.linalg.norm(fn, axis=1, keepdims=True), 1e-9)
+    return pv, np.arange(len(pv)), np.repeat(fn, 3, axis=0)
+
+
+def _smooth_normals(v, t):
+    """Normales lissées (les sommets confondus, comme la couture d'une sphère, sont soudés)."""
+    key = np.unique(np.round(v, 4), axis=0, return_inverse=True)[1].ravel()
+    tri = t.reshape(-1, 3)
+    fn = np.cross(v[tri[:, 1]] - v[tri[:, 0]], v[tri[:, 2]] - v[tri[:, 0]])
+    acc = np.zeros((key.max() + 1, 3))
+    for k in range(3):
+        np.add.at(acc, key[tri[:, k]], fn)
+    n = acc[key]
+    return n / np.maximum(np.linalg.norm(n, axis=1, keepdims=True), 1e-9)
+
+
+def _rock(seed):
+    """Rocher de base : galet arrondi aux formes douces (grosses bosses, quelques plans à peine
+    marqués), la base aplatie et posée au sol. Chaque graine donne une forme."""
+    rng = np.random.default_rng(seed)
+    v, t, n = _sphere(11, 8)
+    dirs = rng.normal(size=(5, 3))
+    dirs /= np.linalg.norm(dirs, axis=1, keepdims=True)
+    u = v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
+    bumps = sum(rng.uniform(.05, .12) * np.clip(u @ d, 0, 1) ** 3 for d in dirs)     # bosses larges
+    cuts = rng.normal(size=(6, 3))
+    cuts /= np.linalg.norm(cuts, axis=1, keepdims=True)
+    flats = sum(np.clip(u @ d - .55, 0, 1) for d in cuts) * .8                        # pans taillés, arêtes adoucies
+    v = v * (1 + bumps - flats)[:, None]
+    v[:, 1] = np.where(v[:, 1] < -.2, -.2 + (v[:, 1] + .2) * .35, v[:, 1])
+    v, t, _ = _outward((v, t, n))
+    return v, t, _smooth_normals(v, t)
+
+
+for _i in range(4):
+    PRIMS[f'rock{_i}'] = _rock(_i + 3)
+PRIMS['prism6'] = _faceted(_outward(_cylinder(6)))       # colonne de roche (basalte, grès)
+PRIMS['prism5'] = _faceted(_outward(_cylinder(5, top_radius=.42)))
+PRIMS['blob_lo'] = _outward(_sphere(10, 7))             # touffe de feuillage légère
+PRIMS['trunk'] = _outward(_cylinder(8, top_radius=.3))   # tronc qui s'affine
+ROCKS = ('rock0', 'rock1', 'rock2', 'rock3')
+
+
+def glowing(col, g):
+    """Couleur à passer à MeshBuilder.add pour une primitive lumineuse à `g` (0 à 1) : le
+    shader lit la lueur dans l'alpha (> 1), sans maillage séparé."""
+    return Vec4(col[0], col[1], col[2], 1 + g)
 
 
 def _rot_matrix(rot):
@@ -332,11 +444,17 @@ class MeshBuilder:
         self.sizes = []           # taille de chaque primitive (pour ignorer les détails au contour)
         self.count = 0
 
-    def add(self, prim, pos=(0, 0, 0), scale=1, rot=(0, 0, 0), col=color.white, wobble=0.0, grad=0.0):
+    def add(self, prim, pos=(0, 0, 0), scale=1, rot=(0, 0, 0), col=color.white, wobble=0.0, grad=0.0,
+            light=0.0, cap=None, tip=None, volume=None):
         """Ajoute une primitive.
 
         wobble : bosselle la surface (formes organiques : feuillages, rochers)
         grad   : assombrit le bas de la forme (dégradé vertical, effet de volume)
+        light  : éclaircit le haut de la forme (sommet des feuillages au soleil)
+        cap    : (couleur, force) : recouvre les faces tournées vers le ciel (mousse, herbe, sable)
+        tip    : (couleur, force) : dégradé vers cette couleur au sommet (pointe des feuilles d'herbe)
+        volume : (x, y, z, force) : oriente les normales depuis ce centre ; plusieurs touffes d'un même
+                 feuillage s'éclairent alors comme un seul volume doux (au lieu d'une grappe de boules)
         """
         v, t, n = PRIMS[prim]
         s = np.array(scale if isinstance(scale, (tuple, list)) else (scale,) * 3, float)
@@ -344,6 +462,12 @@ class MeshBuilder:
         vw = (v * s) @ m.T + np.array(pos, float)
         nw = (n / np.where(s == 0, 1, s)) @ m.T
         nw /= np.maximum(np.linalg.norm(nw, axis=1, keepdims=True), 1e-6)
+        if volume is not None:
+            cx, cy, cz, kv = volume
+            d = vw - np.array((cx, cy, cz), float)
+            d /= np.maximum(np.linalg.norm(d, axis=1, keepdims=True), 1e-6)
+            nw = nw * (1 - kv) + d * kv
+            nw /= np.maximum(np.linalg.norm(nw, axis=1, keepdims=True), 1e-6)
         if wobble:
             k = (np.sin(vw[:, 0] * 1.9 + vw[:, 1] * 1.3 + pos[2]) + np.sin(vw[:, 2] * 2.3 - vw[:, 0] * 1.1 + pos[0])
                  + np.sin(vw[:, 1] * 2.7 + vw[:, 2] * 1.7)) / 3
@@ -351,10 +475,21 @@ class MeshBuilder:
         self.verts.append(vw)
         self.norms.append(nw)
         self.tris.append(t + self.count)
-        c = np.tile(np.array(tuple(col), float), (len(v), 1))
+        col = tuple(col)
+        c = np.tile(np.array(col if len(col) == 4 else col + (1,), float), (len(v), 1))
         if grad:
             f = 1 - grad * np.clip(.5 - v[:, 1], 0, 1)
             c[:, :3] *= f[:, None]
+        if light:
+            c[:, :3] *= (1 + light * np.clip(v[:, 1] * 2, 0, 1))[:, None]
+        if cap is not None:
+            cc, amount = cap
+            m = amount * np.clip((nw[:, 1] - .5) / .3, 0, 1)[:, None]
+            c[:, :3] = c[:, :3] * (1 - m) + np.array(tuple(cc)[:3], float) * m
+        if tip is not None:            # dégradé vers une autre teinte en haut de la forme
+            tc, amount = tip
+            m = amount * np.clip(v[:, 1] + .5, 0, 1)[:, None] ** 1.6
+            c[:, :3] = c[:, :3] * (1 - m) + np.array(tuple(tc)[:3], float) * m
         self.cols.append(c)
         self.sizes.append(float(np.sort(np.abs(s))[1]))
         self.count += len(v)
@@ -391,7 +526,7 @@ class MeshBuilder:
         node.add_geom(geom)
         return NodePath(node)
 
-    def static(self, parent, emissive=0.0, col=None, transparent=False):
+    def static(self, parent, emissive=0.0, col=None, transparent=False, detail=0.0):
         """Comme entity(), mais crée un simple nœud Panda3D (pas une entité Ursina).
 
         Ursina parcourt toutes ses entités à chaque image : pour le décor immobile
@@ -407,6 +542,7 @@ class MeshBuilder:
         node.set_shader(toon_shader._shader)
         node.set_shader_input('flash', Vec4(1, 1, 1, 0))
         node.set_shader_input('emissive', float(emissive))
+        node.set_shader_input('detail', float(detail))
         node.set_two_sided(True)
         node.set_transparency(TransparencyAttrib.M_alpha if transparent else TransparencyAttrib.M_none)
         if col is not None:
@@ -480,6 +616,12 @@ class ChunkedBuilder:
         if self.lift is not None:
             pos = (pos[0], pos[1] + self.lift(pos[0], pos[2]), pos[2])
         b.add(prim, pos, scale, rot, col, **kw)
+        return self
+
+    def add_raw(self, verts, tris, norms, cols):
+        """Maillage libre (positions absolues, sans relief ajouté), rangé dans le carré de son 1er sommet."""
+        key = (int(math.floor(verts[0][0] / self.size)), int(math.floor(verts[0][2] / self.size)))
+        self.parts.setdefault(key, MeshBuilder()).add_raw(verts, tris, norms, cols)
         return self
 
     def entity(self, parent=None, emissive=0.0, **kwargs):

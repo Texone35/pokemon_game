@@ -362,6 +362,7 @@ class ClientSync:
             u.level = level
             if up and u.alive:
                 u.level_fx()
+            u.check_evolution(show=up)
         if hp != int(math.ceil(u.hp)):
             u.hp = hp
             u._refresh_bar()
@@ -485,6 +486,9 @@ class ClientSync:
             o = self.unit(e[1])
             if o is not None and o is not m.player:
                 m.announce_cast(o, str(e[2]))
+        elif kind == 'impact':
+            _, k, x, y, z, size = e
+            fx.impact(str(k), Vec3(x, y, z), size, ground=m.stadium.walk_y(x, z))
         elif kind == 'burst':
             _, x, y, z, col, n, speed, size = e
             fx.burst(None, Vec3(x, y, z), col_in(col), n=n, speed=speed, size=size)
@@ -497,6 +501,8 @@ class ClientSync:
             if self.unit(uid) is m.player:
                 self.life = n
                 m.teleport_local(Vec3(x, 0, z))
+        elif kind == 'stats':
+            m.receive_stats(e[1])
         elif kind == 'restart':
             m.restart_view()
 
