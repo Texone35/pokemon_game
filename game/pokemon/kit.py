@@ -107,8 +107,14 @@ def kit(line, build=None):
 
 
 def auto_for(line, form, build=None):
-    """Auto-attaque d'un Pokémon d'équipe sous sa forme actuelle."""
-    return _scaled(kit(line, build)['auto'], stage_of(line, form))
+    """Auto-attaque d'un Pokémon d'équipe : identique pour tous (C.AUTO_ATTACK), seul son aspect
+    (couleur, forme) vient du kit."""
+    look = kit(line, build)['auto']
+    auto = dict(C.AUTO_ATTACK)
+    auto['color'] = look.get('color', C.TYPES[C.SPECIES[line]['type']]['light'])
+    if look.get('shape'):
+        auto['shape'] = look['shape']
+    return auto
 
 
 def moves_for(line, form, level=None, build=None):

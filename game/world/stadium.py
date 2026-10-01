@@ -1210,12 +1210,9 @@ class Stadium:
 
     # ================================================================ arènes
     def _build_arenas(self):
-        """Chaque arène a son décor thématique (voir arenas.py) et deux petites tribunes."""
+        """Chaque arène a son décor thématique (voir arenas.py)."""
         from game.world.arenas import ArenaDecor
         for a in C.ARENAS:
-            x0, z0 = a['pos']
-            if a['key'] not in self.plateaus:     # sur un plateau : bannières à la place des tribunes
-                self._arena_stands(a, C.TYPES[a['type']], x0, z0, C.ARENA_RADIUS)
             ArenaDecor(self, a).build()
 
     def _arena_stands(self, a, t, x0, z0, R):

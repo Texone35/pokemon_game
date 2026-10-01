@@ -43,6 +43,8 @@ QUALITY = {
     'grass': 1400,             # touffes d'herbe et de fleurs
     'relief': 1.0,             # hauteur des collines (0 = sol plat)
     'detail': 1.0,             # grain du sol et de la roche (0 = couleurs unies, un peu plus léger)
+    'weather': .6,             # densité de la météo des arènes (pluie, sable...) : 1 = maximum, 0 = aucune
+    'two_sided': False,        # dessiner aussi l'intérieur des volumes du décor (inutile, ~25 % de FPS en moins)
 }
 
 # ---------------------------------------------------------------- carte
@@ -68,6 +70,33 @@ ARENAS = [
 
 ZONE_NAMES = {'eau': 'Arène Eau', 'feu': 'Arène Feu', 'plante': 'Arène Plante', 'electrik': 'Arène Électrik',
               'roche': 'Arène Roche', 'riviere': 'Rivière'}
+
+
+# ---------------------------------------------------------------- forme des arènes
+# Les arènes sont hexagonales : sommets sur le cercle de rayon ARENA_RADIUS (côtés plats au nord et au
+# sud). Angles comptés depuis le nord, dans le sens des aiguilles d'une montre (comme `polar`).
+def hex_factor(ang):
+    """Distance du centre au bord de l'hexagone dans la direction `ang`, pour un rayon (sommet) de 1."""
+    import math
+    d = (ang + 30) % 60 - 30
+    return math.cos(math.radians(30)) / math.cos(math.radians(d))
+
+
+def hex_normal(ang):
+    """Orientation du côté de l'hexagone le plus proche de la direction `ang` (sa normale)."""
+    return round(ang / 60) * 60
+
+
+def in_arena(dx, dz, radius=None):
+    """Vrai si le point (dx, dz) relatif au centre d'une arène est dans son hexagone."""
+    import math
+    r = ARENA_RADIUS if radius is None else radius
+    d = math.hypot(dx, dz)
+    if d < r * .866:
+        return True
+    if d >= r:
+        return False
+    return d < r * hex_factor(math.degrees(math.atan2(dx, dz)))
 
 
 def zone_effect(zone, ptype):

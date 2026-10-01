@@ -38,8 +38,10 @@ SLOTS = (1, 2, 3, 4, 'ult')
 # zone au sol...) se visent à la souris (maintenir la touche, relâcher pour lancer). Celles qui
 # agissent autour du Pokémon partent tout de suite.
 SELF_CAST = ('spin', 'wave', 'nova', 'heal')
-AUTO_POWER = .7                # puissance des auto-attaques des Pokémon d'équipe (x 0,7 : elles complètent
-                               # les attaques entre deux recharges sans les remplacer)
+AUTO_POWER = 1.0               # multiplicateur global des auto-attaques des Pokémon d'équipe
+# Auto-attaque : la MÊME pour tous les Pokémon d'équipe (portée, puissance, cadence, vitesse du tir).
+# Seuls l'aspect (couleur, forme du projectile) et les stats (Attaque, Vitesse) font la différence.
+AUTO_ATTACK = {'kind': 'ranged', 'power': 32, 'range': 10.0, 'cooldown': .8, 'speed': 24, 'size': .55}
 UNLOCK = {1: 1, 2: 3, 3: 5, 4: 7, 'ult': 10}     # niveau qui débloque chaque attaque
 AIM_POWER = {'lock': 1.0, 'skill': 1.25}          # bonus de puissance des attaques visées
 CAST_LOCK = .3                 # délai minimal entre deux attaques (hors auto-attaque)

@@ -692,6 +692,13 @@ class Unit:
         if not self.alive:
             self.creature.animate(dt)
             return
+        if self.kind == 'neutral' and self.brain is not None and self.brain.target is None \
+                and self.hp >= self.max_hp and not any(self.status.values()):
+            # neutre au repos (pleine santé, sans cible) : il ne réfléchit que 4 fois par seconde
+            self._idle_dt = getattr(self, '_idle_dt', 0.0) + dt
+            if self._idle_dt < .25:
+                return
+            dt, self._idle_dt = self._idle_dt, 0.0
         self._tick_timers(dt)
         expired = False
         for k in self.buffs:

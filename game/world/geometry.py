@@ -8,6 +8,8 @@ jeu fluide même avec des centaines d'arbres.
 import math
 
 import numpy as np
+
+from game import config as C
 from ursina import Entity, Shader, Vec3, Vec4, color
 
 
@@ -68,12 +70,10 @@ in vec3 v_normal;
 in vec3 v_world;
 in vec4 v_shadow;
 out vec4 frag;
-float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-float vnoise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    vec2 u = f * f * (3.0 - 2.0 * f);
-    return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
-}
+uniform sampler2D noise_tex;
+// bruit lissé lu dans une petite texture précalculée (16 x 16 cases qui se répètent) : une lecture
+// de texture au lieu de quatre calculs trigonométriques par appel (gros gain sur puce Intel)
+float vnoise(vec2 p) { return texture(noise_tex, p * 0.0625).r; }
 void main() {
     vec4 base = v_color * p3d_ColorScale;
     if (detail > 0.0) {
@@ -174,9 +174,34 @@ def unfreeze_shadows(sun):
         buf.set_active(True)
 
 
+def noise_texture(cells=16, res=256, seed=7):
+    """Texture de bruit lissé qui se répète (même aspect que l'ancien bruit calculé dans le shader)."""
+    from panda3d.core import SamplerState, Texture as PTexture
+    rng = np.random.default_rng(seed)
+    lat = rng.random((cells, cells)).astype(np.float32)
+    t = (np.arange(res) + .5) / res * cells
+    i0 = np.floor(t).astype(int) % cells
+    i1 = (i0 + 1) % cells
+    f = t - np.floor(t)
+    u = f * f * (3 - 2 * f)
+    rows = lat[i0][:, i0] * (1 - u)[None, :] + lat[i0][:, i1] * u[None, :]
+    rows1 = lat[i1][:, i0] * (1 - u)[None, :] + lat[i1][:, i1] * u[None, :]
+    img = rows * (1 - u)[:, None] + rows1 * u[:, None]
+    tex = PTexture('bruit')
+    tex.setup_2d_texture(res, res, PTexture.T_unsigned_byte, PTexture.F_luminance)
+    tex.set_ram_image(np.ascontiguousarray((img * 255).astype(np.uint8)).tobytes())
+    tex.set_wrap_u(SamplerState.WM_repeat)
+    tex.set_wrap_v(SamplerState.WM_repeat)
+    tex.set_minfilter(SamplerState.FT_linear_mipmap_linear)
+    tex.set_magfilter(SamplerState.FT_linear)
+    return tex
+
+
 def set_environment(**kwargs):
     """Applique (ou modifie) l'ambiance globale : lumière, ciel, brouillard."""
     from ursina import scene
+    if 'noise_tex' not in ENV:
+        ENV['noise_tex'] = noise_texture()
     for key, value in kwargs.items():
         if key == 'fog_range':
             ENV[key] = tuple(value)
@@ -543,7 +568,13 @@ class MeshBuilder:
         node.set_shader_input('flash', Vec4(1, 1, 1, 0))
         node.set_shader_input('emissive', float(emissive))
         node.set_shader_input('detail', float(detail))
-        node.set_two_sided(True)
+        # faces arrière non dessinées : le décor est fait de volumes fermés, et ne pas dessiner leur
+        # intérieur divise presque par deux le travail de la carte graphique (gros gain sur puce Intel)
+        if C.QUALITY.get('two_sided', False):
+            node.set_two_sided(True)
+        else:                       # nos maillages tournent dans le sens horaire : on écarte l'autre sens
+            from panda3d.core import CullFaceAttrib
+            node.set_attrib(CullFaceAttrib.make(CullFaceAttrib.M_cull_counter_clockwise))
         node.set_transparency(TransparencyAttrib.M_alpha if transparent else TransparencyAttrib.M_none)
         if col is not None:
             node.set_color_scale(Vec4(*col))
@@ -629,6 +660,47 @@ class ChunkedBuilder:
 
     def static(self, parent, emissive=0.0, **kw):
         return [b.static(parent, emissive, **kw) for b in self.parts.values() if b.count]
+
+
+def hex_points(cx, cz, r):
+    """Sommets d'un hexagone (côtés plats au nord et au sud) de rayon r, dans l'ordre du dallage."""
+    pts = [(cx + math.sin(math.radians(30 + 60 * k)) * r, cz + math.cos(math.radians(30 + 60 * k)) * r)
+           for k in range(6)]
+    return sorted(pts, key=lambda p: math.atan2(p[1] - cz, p[0] - cx))
+
+
+def add_hex_slab(b, cx, y, cz, r, h, col):
+    """Dalle hexagonale (dessus + flancs) dans le constructeur b."""
+    c = (col[0], col[1], col[2], col[3] if len(col) > 3 else 1)
+    top = hex_points(cx, cz, r)
+    verts = [(cx, y + h / 2, cz)] + [(x, y + h / 2, z) for x, z in top]
+    tris = []
+    for i in range(6):
+        tris += [0, 1 + (i + 1) % 6, 1 + i]
+    norms = [(0, 1, 0)] * 7
+    base = len(verts)
+    for i in range(6):                                   # flancs (dans les deux sens : toujours visibles)
+        (x0, z0), (x1, z1) = top[i], top[(i + 1) % 6]
+        nx, nz = (x0 + x1) / 2 - cx, (z0 + z1) / 2 - cz
+        ln = math.hypot(nx, nz) or 1
+        k = base + i * 4
+        verts += [(x0, y + h / 2, z0), (x1, y + h / 2, z1), (x1, y - h / 2, z1), (x0, y - h / 2, z0)]
+        norms += [(nx / ln, 0, nz / ln)] * 4
+        tris += [k, k + 1, k + 2, k, k + 2, k + 3, k, k + 2, k + 1, k, k + 3, k + 2]
+    b.add_raw(np.array(verts), np.array(tris), np.array(norms), np.array([c] * len(verts)))
+
+
+def add_hex_band(b, cx, y, cz, r_out, r_in, h, col):
+    """Bande (anneau) hexagonale entre les rayons r_in et r_out."""
+    c = (col[0], col[1], col[2], col[3] if len(col) > 3 else 1)
+    po, pi = hex_points(cx, cz, r_out), hex_points(cx, cz, r_in)
+    yy = y + h / 2
+    verts = [(x, yy, z) for x, z in po] + [(x, yy, z) for x, z in pi]
+    tris = []
+    for i in range(6):
+        j = (i + 1) % 6
+        tris += [i, j, 6 + j, i, 6 + j, 6 + i, i, 6 + j, j, i, 6 + i, 6 + j]     # les deux sens
+    b.add_raw(np.array(verts), np.array(tris), np.array([(0, 1, 0)] * 12), np.array([c] * 12))
 
 
 def destroy_tree(entity):

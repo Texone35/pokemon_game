@@ -55,6 +55,17 @@ app = Ursina(title='smoke test', size=C.WINDOW_SIZE, development_mode=False, vsy
              window_type='onscreen' if args.window else 'offscreen')
 
 from game.interface.widgets import Banner  # noqa: E402
+
+# mesures : Panda3D se met en pause quand il croit sa fenêtre réduite (fenêtre de test en arrière-plan)
+_win_event = application.base.windowEvent
+
+
+def _never_minimized(win):
+    _win_event(win)
+    application.base.mainWinMinimized = False
+
+
+application.base.accept('window-event', _never_minimized)
 from game.match import Match  # noqa: E402
 from game.pokemon.units import PlayerBrain  # noqa: E402
 from tools.pilot import Pilot  # noqa: E402
@@ -87,6 +98,14 @@ def main():
     match = Match(game, {'humans': [species], 'local': 0, 'role': 'solo', 'ai': args.ai, 'seed': args.seed,
                           'builds': [args.build]})
     game.match = match
+    GAME['match'] = match
+    real_update = match.update
+
+    def timed_update():
+        f0 = systime.perf_counter()
+        real_update()
+        GAME['py'].append((systime.perf_counter() - f0) * 1000)
+    match.update = timed_update
     match.player.brain = Pilot(match.player, match)
     if args.bot_player:                                   # équilibrage : même jeu que les IA
         pb = match.player.brain
@@ -158,6 +177,13 @@ def main():
         application.base.win.set_active(True)
     if args.fps:
         measure_fps(args.fps, 'fin de partie')
+    if args.profile and args.at:                       # profilage à un endroit précis (arène tenue)
+        from ursina import Vec3
+        x, z = (float(v) for v in args.at.split(','))
+        a = min(match.arenas, key=lambda a: (a['pos'] - Vec3(x, 0, z)).length())
+        a['owner'], a['control'] = match.player.team, 1.0
+        match.player.reset(pos=Vec3(x, 0, z))
+        match.player.brain = PlayerBrain(match.player, match)
     if args.profile:
         import cProfile
         import pstats
@@ -165,7 +191,7 @@ def main():
         pr.enable()
         measure_fps(args.profile, 'profilage')
         pr.disable()
-        st = pstats.Stats(pr); st.sort_stats('cumulative').print_stats('pokemon_game', 30); st.print_callers('entity.py:846|entity.py:627')
+        st = pstats.Stats(pr); st.sort_stats('tottime').print_stats(14); st.sort_stats('cumulative').print_stats('pokemon_game', 14)
     if args.shot:
         shot(match)
     print(f'{match.time / 60:.1f} min de jeu simulées en {systime.time() - t1:.0f} s réelles ; '
@@ -270,15 +296,30 @@ def snapshot(match):
     return out
 
 
+GAME = {'match': None, 'py': []}
+
+
 def measure_fps(seconds, label):
+    GAME['py'] = []
     clock = ClockObject.getGlobalClock()
     clock.setMode(ClockObject.MNormal)
     n, t1 = 0, systime.time()
+    frames = []
     while systime.time() - t1 < seconds:
         application.base.mainWinMinimized = False
+        f0 = systime.perf_counter()
         app.step()
+        frames.append((systime.perf_counter() - f0) * 1000)
         n += 1
-    print(f'FPS ({label}) : {n / (systime.time() - t1):.1f}', flush=True)
+    frames.sort()
+    m = GAME['match']
+    if m is not None:
+        ct = m.cam_target
+        print(f'   caméra en ({ct.x:.0f}, {ct.z:.0f}), joueur {"en vie" if m.player.alive else "K.O."}, '
+              f'particules {m.particles.alive() if hasattr(m.particles, "alive") else "?"}, '
+              f'logique Python médiane {sorted(GAME["py"])[len(GAME["py"]) // 2] if GAME["py"] else 0:.1f} ms', flush=True)
+    print(f'FPS ({label}) : {n / (systime.time() - t1):.1f}   image médiane {frames[len(frames) // 2]:.1f} ms, '
+          f'95 % {frames[int(len(frames) * .95)]:.1f} ms, pire {frames[-1]:.1f} ms', flush=True)
 
 
 def entity_census():

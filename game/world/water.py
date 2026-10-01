@@ -189,14 +189,17 @@ class WaterBuilder:
         self.count += n
         return self
 
-    def disc(self, x, y, z, r, kind='water', depth=1.0, speed=.05, alpha=1.0, seg=36, flow=(0, 0, 0), sx=1.0):
-        """Bassin rond (ou ovale avec sx) : profond au centre, peu profond au bord."""
+    def disc(self, x, y, z, r, kind='water', depth=1.0, speed=.05, alpha=1.0, seg=36, flow=(0, 0, 0), sx=1.0,
+             hexa=False):
+        """Bassin rond (ou ovale avec sx, ou hexagonal avec hexa) : profond au centre, peu profond au bord."""
+        from game import config as C
         rings = (0.0, .45, .8, 1.0)
         v, dd = [], []
         for k, t in enumerate(rings):
             for i in range(seg if k else 1):
                 a = math.tau * i / seg
-                v.append((x + math.sin(a) * r * t * sx, y, z + math.cos(a) * r * t))
+                h = C.hex_factor(math.degrees(a)) if hexa else 1.0
+                v.append((x + math.sin(a) * r * t * sx * h, y, z + math.cos(a) * r * t * h))
                 dd.append(depth * (1 - t ** 2.2))
         tris = []
         for i in range(seg):
@@ -208,13 +211,15 @@ class WaterBuilder:
                 tris += [o0 + i, o1 + i, o1 + j, o0 + i, o1 + j, o0 + j]
         return self.add_raw(v, tris, flow, dd, speed, kind, alpha)
 
-    def ring(self, x, y, z, r0, r1, kind='water', depth=1.0, speed=.25, alpha=1.0, seg=96):
-        """Canal circulaire (douve) : le courant tourne autour du centre."""
+    def ring(self, x, y, z, r0, r1, kind='water', depth=1.0, speed=.25, alpha=1.0, seg=96, hexa=False):
+        """Canal circulaire (ou hexagonal avec hexa) : le courant tourne autour du centre."""
+        from game import config as C
         v, dd, fl = [], [], []
         for i in range(seg):
             a = math.tau * i / seg
+            h = C.hex_factor(math.degrees(a)) if hexa else 1.0
             for k, t in enumerate((0, .5, 1)):
-                r = r0 + (r1 - r0) * t
+                r = (r0 + (r1 - r0) * t) * h
                 v.append((x + math.sin(a) * r, y, z + math.cos(a) * r))
                 dd.append(depth * (1 - abs(t - .5) * 2) ** .6)
                 fl.append((math.cos(a), 0, -math.sin(a)))

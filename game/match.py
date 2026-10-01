@@ -16,7 +16,7 @@ announce() / say() / emit(), qui les envoient aussi à l'autre PC.
 import math
 import random
 
-from ursina import Entity, Text, Texture, Vec3, Vec4, camera, color, destroy, lerp, mouse, time
+from ursina import Circle, Entity, Text, Texture, Vec3, Vec4, camera, color, destroy, lerp, mouse, time
 
 from game import config as C
 from game.pokemon import kit
@@ -25,7 +25,7 @@ from game.pokemon.creatures import Portraits
 from game.world.emblems import add_emblem
 from game.world.fx import ArenaWeather
 from game.interface.style import key_label
-from game.world.geometry import MeshBuilder, destroy_tree, flat_circle
+from game.world.geometry import MeshBuilder, add_hex_band, destroy_tree, flat_circle
 from game.world.stadium import LANES, RIVERS, Stadium
 from game.interface.widgets import Feed, MoveSlot, floating_text, hp_color
 from game.pokemon.units import ALLY_BAR, BotBrain, NeutralBrain, PlayerBrain, RemotePlayerBrain, TowerBrain, Unit
@@ -155,9 +155,9 @@ class Match(Entity):
             p = v3(cfg['pos'])
             y0 = self.stadium.arena_floor(cfg['key'])          # arène perchée sur un plateau
             t = C.TYPES[cfg['type']]
-            ring = MeshBuilder().add('ring_thin', (0, 0, 0), (1, 1, 1), col=color.white).entity(
-                parent=self.root, emissive=1.0, position=p + Vec3(0, y0 + .15, 0), scale=(R * 2, .25, R * 2),
-                color=NEUTRAL_RING)
+            hb = MeshBuilder()                         # liseré hexagonal de la zone de capture
+            add_hex_band(hb, 0, 0, 0, R + .25, R - .25, .05, color.white)
+            ring = hb.entity(parent=self.root, emissive=1.0, position=p + Vec3(0, y0 + .15, 0), color=NEUTRAL_RING)
             crystal = MeshBuilder()
             crystal.add('cone4', (0, .6, 0), (1.2, 1.2, 1.2), col=color.white)
             crystal.add('cone4', (0, -.6, 0), (1.2, 1.2, 1.2), rot=(180, 0, 0), col=color.white)
@@ -485,7 +485,7 @@ class Match(Entity):
 
     def arena_at(self, pos):
         for a in self.arenas:
-            if (flat(pos) - a['pos']).length() < C.ARENA_RADIUS:
+            if C.in_arena(pos.x - a['pos'].x, pos.z - a['pos'].z):
                 return a
         return None
 
@@ -1227,14 +1227,13 @@ class Match(Entity):
                             u.respawn_t = C.RESPAWN_TIME
 
     def _update_capture(self, dt):
-        R = C.ARENA_RADIUS
         changed = False
         for a in self.arenas:
             cnt = {'rouge': 0, 'bleu': 0}
             mins = {'rouge': 0, 'bleu': 0}
             for u in self.units:
                 if u.alive and u.team and u.kind in ('pokemon', 'minion') \
-                        and (flat(u.position) - a['pos']).length() < R:
+                        and C.in_arena(u.position.x - a['pos'].x, u.position.z - a['pos'].z):
                     (cnt if u.kind == 'pokemon' else mins)[u.team] += 1
             a['count'] = cnt
             nr, nb = cnt['rouge'], cnt['bleu']
@@ -1266,7 +1265,7 @@ class Match(Entity):
                 self._arena_event(a, old)
                 if a['owner']:                   # capture : comptée pour chaque Pokémon présent
                     for u in self.team_units[a['owner']]:
-                        if u.alive and (flat(u.position) - a['pos']).length() < R:
+                        if u.alive and C.in_arena(u.position.x - a['pos'].x, u.position.z - a['pos'].z):
                             self.add_stat(u, 'caps', 1)
                             self.reward(u, C.XP_CAPTURE, C.GOLD_CAPTURE)
                         else:
@@ -1636,7 +1635,8 @@ class Match(Entity):
                                    scale=C.WEATHER_RADIUS * 2 * self.map_s) for a in self.arenas]
         self.map_arenas = []
         for a in self.arenas:
-            self.map_arenas.append(Entity(parent=self.map_root, model='circle', color=NEUTRAL_RING,
+            self.map_arenas.append(Entity(parent=self.map_root, model=Circle(resolution=6), color=NEUTRAL_RING,
+                                          rotation_z=30,                     # côtés plats au nord et au sud
                                           position=(a['pos'].x * self.map_s, a['pos'].z * self.map_s, .01),
                                           scale=C.ARENA_RADIUS * 2 * self.map_s))
         self.map_pit = Entity(parent=self.map_root, model='circle', color=color.rgb(.35, .3, .45), scale=.03, z=.005)
@@ -1809,6 +1809,10 @@ class Match(Entity):
         for pad, dot in zip(self.pads, self.map_pads):
             dot.enabled = pad['alive']
         me = self.player.team
+        self._map_t = getattr(self, '_map_t', 0.0) - dt
+        if self._map_t > 0:                       # mini-carte : 10 mises à jour par seconde suffisent
+            return self._update_hud_player(dt)
+        self._map_t = .1
         for u, dot in self.map_minions.items():
             on = u.alive and (u.team == me or self.in_vision(me, u))
             if dot.enabled != on:
@@ -1819,7 +1823,10 @@ class Match(Entity):
             dot.enabled = u.alive and self.in_vision(me, u)      # adversaires : seulement s'ils sont vus
             if u.alive:
                 dot.position = (u.position.x * self.map_s, u.position.z * self.map_s, dot.z)
-        # joueur
+        self._update_hud_player(dt)
+
+    def _update_hud_player(self, dt):
+        """Fiche du joueur, cases d'attaque, cartes d'information (à chaque image)."""
         pl = self.player
         self._set_text(self.p_title, f'{pl.name}   Nv.{pl.level}')
         ratio = max(0, pl.hp / pl.max_hp)

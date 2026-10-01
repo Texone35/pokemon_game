@@ -852,7 +852,8 @@ class ArenaWeather:
         """Nombre de particules à émettre cette image pour un débit donné."""
         if self._warm and per_s < 20:
             dt = self._warm
-        v = self._acc.get(key, 0.0) + per_s * dt
+        from game import config as C
+        v = self._acc.get(key, 0.0) + per_s * dt * C.QUALITY.get('weather', 1.0)
         n = int(v)
         self._acc[key] = v - n
         return n

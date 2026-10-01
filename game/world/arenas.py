@@ -22,7 +22,7 @@ from ursina import color
 
 from game import config as C
 from game.world.emblems import add_emblem
-from game.world.geometry import ROCKS, MeshBuilder, glowing
+from game.world.geometry import ROCKS, MeshBuilder, add_hex_band, add_hex_slab, glowing
 from game.world.stadium import BASALTS, LANES, SAND_TOP, polyline_dist
 
 
@@ -89,7 +89,7 @@ class ArenaDecor:
         for i in range(n):
             ang = offset + i * step + self.rng.uniform(-jitter, jitter)
             r = self.rng.uniform(rmin, rmax)
-            x, z = polar(ang, r, self.x0, self.z0)
+            x, z = self.hpolar(ang, r)
             if self.near_gate(ang, 10) or not self.st._clear_of_lanes(x, z, clear):
                 continue
             if self.st.blocked(x, z, radius) or math.hypot(x, z) > C.FIELD_RADIUS - 5:
@@ -98,10 +98,21 @@ class ArenaDecor:
         return out
 
     def disc(self, b, r, y, h, col, prim='cyl_hi'):
-        b.add(prim, (self.x0, y, self.z0), (r * 2, h, r * 2), col=col)
+        """Sol de l'arène : hexagonal (les petits médaillons du centre restent ronds)."""
+        if r >= 5:
+            add_hex_slab(b, self.x0, y, self.z0, r, h, col)
+        else:
+            b.add(prim, (self.x0, y, self.z0), (r * 2, h, r * 2), col=col)
 
     def ring(self, b, r, y, h, col, prim='ring_97'):
-        b.add(prim, (self.x0, y, self.z0), (r * 2, h, r * 2), col=col)
+        if r >= 5:
+            add_hex_band(b, self.x0, y, self.z0, r + .35, r - .35, h, col)
+        else:
+            b.add(prim, (self.x0, y, self.z0), (r * 2, h, r * 2), col=col)
+
+    def hpolar(self, ang, r):
+        """Point à l'angle `ang` sur le contour hexagonal de « rayon » r (autour du centre de l'arène)."""
+        return polar(ang, r * (C.hex_factor(ang) if r >= 5 else 1), self.x0, self.z0)
 
     def hex_tiles(self, b, size, y, h, col_fn, r_in=0.0, r_out=None, gap=.9, jitter=0.0, prim='cyl6'):
         """Pavage de dalles hexagonales (ou irrégulières avec `jitter`) sur l'anneau [r_in, r_out]."""
@@ -114,7 +125,7 @@ class ArenaDecor:
                 x = i * dx + (j % 2) * dx / 2
                 z = j * dz
                 d = math.hypot(x, z)
-                if d > r_out - size * .6 or d < r_in + size * .6:
+                if not C.in_arena(x, z, r_out - size * .6) or d < r_in + size * .6:
                     continue
                 s = size * 2 * gap * (1 - rng.uniform(0, jitter))
                 ox = rng.uniform(-jitter, jitter) * size
@@ -137,7 +148,7 @@ class ArenaDecor:
             if not reg or -1 in reg:
                 continue
             poly = vor.vertices[reg]
-            if np.hypot(poly[:, 0], poly[:, 1]).max() > r_out or math.hypot(px, pz) < r_in:
+            if not all(C.in_arena(vx, vz, r_out) for vx, vz in poly) or math.hypot(px, pz) < r_in:
                 continue
             c = poly.mean(0)
             poly = poly[np.argsort(np.arctan2(poly[:, 1] - c[1], poly[:, 0] - c[0]))]
@@ -171,7 +182,7 @@ class ArenaDecor:
         traverse au-dessus : elle cacherait les Pokémon qui passent dessous)."""
         r = self.R + 4.6
         for ang, w in self.gates:
-            cx, cz = polar(ang, r, self.x0, self.z0)
+            cx, cz = self.hpolar(ang, r)
             tx, tz = math.cos(math.radians(ang)), -math.sin(math.radians(ang))   # tangente
             half = w / 2 + 1.5
             for s in (-1, 1):
@@ -197,7 +208,7 @@ class ArenaDecor:
         self.paving(R - .2, 2.3, .1, lambda x, z: shade(rng.choice(stones), rng.uniform(.9, 1.06)), gap=.13, r_in=2.6)
         for _ in range(10):                                   # fissures
             a, r = rng.uniform(0, 360), rng.uniform(4, R - 2)
-            x, z = polar(a, r, self.x0, self.z0)
+            x, z = self.hpolar(a, r)
             b.add('box', (x, .145, z), (.07, .01, rng.uniform(1.2, 2.4)), rot=(0, rng.uniform(0, 180), 0), col=dark)
         # médaillon central taillé
         self.disc(b, 2.9, .09, .12, rgb(.6, .49, .35))
@@ -207,7 +218,8 @@ class ArenaDecor:
         n = 40
         for i in range(n):
             ang = i * 360 / n + rng.uniform(-1.5, 1.5)
-            x, z = polar(ang, R + 1.1, self.x0, self.z0)
+            x, z = self.hpolar(ang, R + 1.1)
+            ang = C.hex_normal(ang)                 # bordure alignée sur le côté de l'hexagone
             c = shade(rgb(.66, .56, .44), rng.uniform(.85, 1.1))
             b.add('box', (x, .12, z), (2 * math.pi * (R + 1.1) / n * rng.uniform(.8, .95), .2, rng.uniform(1.2, 1.6)),
                   rot=(rng.uniform(-3, 3), ang + rng.uniform(-4, 4), rng.uniform(-2, 2)), col=c)
@@ -215,7 +227,7 @@ class ArenaDecor:
         back = self.outward()
         for side, team in ((-1, 'rouge'), (1, 'bleu')):
             ang = back + side * 24
-            x, z = polar(ang, R + 2.3, self.x0, self.z0)
+            x, z = self.hpolar(ang, R + 2.3)
             tc = C.TEAMS[team]['color']
             for s_ in (-1, 1):
                 px, pz = polar(ang + 90, 2.1 * s_, x, z)
@@ -245,7 +257,7 @@ class ArenaDecor:
         self.disc(b, R + .3, .07, .08, rgb(.34, .6, .27))
         for _ in range(160):                                  # herbe plus claire et plus sombre
             a, r = rng.uniform(0, 360), math.sqrt(rng.random()) * (R - .5)
-            x, z = polar(a, r, self.x0, self.z0)
+            x, z = self.hpolar(a, r)
             b.add('cyl8', (x, .115, z), (rng.uniform(1.2, 2.4), .01, rng.uniform(1.2, 2.4)),
                   col=rng.choice((rgb(.37, .63, .29), rgb(.32, .57, .25))))
         # allée circulaire et allées en croix : terre battue et pierres plates
@@ -253,21 +265,21 @@ class ArenaDecor:
         dirt = rgb(.6, .5, .36)
         self.ring(b, R * .8 - .62, .12, .02, dirt, 'ring')
         for ang in (45, 135, 225, 315):
-            x, z = polar(ang, 3.6 + 1.95, self.x0, self.z0)
+            x, z = self.hpolar(ang, 3.6 + 1.95)
             b.add('box', (x, .12, z), (1.3, .02, 5.2), rot=(0, ang, 0), col=dirt)
         for rr, n in ((R * .8, 34), (R * .8 - 1.25, 30)):
             for i in range(n):
-                x, z = polar(i * 360 / n + rng.uniform(-2, 2), rr, self.x0, self.z0)
+                x, z = self.hpolar(i * 360 / n + rng.uniform(-2, 2), rr)
                 b.add('cyl8', (x, .13, z), (1.05, .06, .85), rot=(0, rng.uniform(0, 90), 0), col=shade(path, rng.uniform(.9, 1.05)))
         for ang in (45, 135, 225, 315):
             for k in range(4):
-                x, z = polar(ang + rng.uniform(-3, 3), 3.6 + k * 1.3, self.x0, self.z0)
+                x, z = self.hpolar(ang + rng.uniform(-3, 3), 3.6 + k * 1.3)
                 b.add('cyl8', (x, .13, z), (1.0, .06, .8), rot=(0, rng.uniform(0, 90), 0), col=shade(path, rng.uniform(.9, 1.05)))
         # massifs de fleurs sur la pelouse
         petal_cols = (rgb(1, .45, .62), rgb(1, .92, .35), rgb(.98, .98, 1), rgb(.72, .5, 1), rgb(1, .6, .3))
         for i in range(8):
             ang = i * 45 + 22.5
-            x, z = polar(ang, R * .55, self.x0, self.z0)
+            x, z = self.hpolar(ang, R * .55)
             c = petal_cols[i % len(petal_cols)]
             for _ in range(9):
                 ox, oz = rng.uniform(-1.1, 1.1), rng.uniform(-1.1, 1.1)
@@ -276,7 +288,7 @@ class ArenaDecor:
         # grande fleur en mosaïque au centre
         for i in range(8):
             ang = i * 45
-            x, z = polar(ang, 1.9, self.x0, self.z0)
+            x, z = self.hpolar(ang, 1.9)
             b.add('sphere', (x, .12, z), (1.4, .06, 2.6), rot=(0, ang, 0), col=rgb(1, .55, .7) if i % 2 else rgb(1, .72, .82))
         self.disc(b, 1.3, .15, .04, rgb(1, .86, .3), 'cyl24')
         self.emblem(s=R * .1, y=.2, col=rgb(.25, .7, .25))
@@ -286,7 +298,8 @@ class ArenaDecor:
             ang = i * 360 / n
             if self.near_gate(ang, 12):
                 continue
-            x, z = polar(ang, R + 1.4, self.x0, self.z0)
+            x, z = self.hpolar(ang, R + 1.4)
+            ang = C.hex_normal(ang)                 # bordure alignée sur le côté de l'hexagone
             b.add('blob', (x, .35, z), (2.3, .8, 1.3), rot=(0, ang + 90, 0), col=shade(rgb(.2, .5, .2), rng.uniform(.9, 1.1)),
                   wobble=.2, grad=.4)
             if i % 2:
@@ -353,7 +366,7 @@ class ArenaDecor:
 
         def pt(a, phi):
             p = math.radians(phi)
-            x, z = polar(a, Rd * math.cos(p), self.x0, self.z0)
+            x, z = self.hpolar(a, Rd * math.cos(p))
             return x, Hd * math.sin(p), z
 
         def bar(p, q, w, col):
@@ -404,7 +417,8 @@ class ArenaDecor:
         n = 32
         for i in range(n):
             ang = i * 360 / n
-            x, z = polar(ang, R + 1.45, self.x0, self.z0)
+            x, z = self.hpolar(ang, R + 1.45)
+            ang = C.hex_normal(ang)                 # bordure alignée sur le côté de l'hexagone
             w = 2 * math.pi * (R + 1.45) / n
             b.add('box', (x, .1, z), (w * .96, .14, 2.0), rot=(0, ang, 0), col=yellow if i % 2 else shade(steel, .9))
             if i % 2 == 0:
@@ -423,7 +437,7 @@ class ArenaDecor:
                 for i in range(m + 1):
                     a = a0 + (a1 - a0) * i / m
                     for r in (r0 + .1, r1 - .1):
-                        x, z = polar(a, r, self.x0, self.z0)
+                        x, z = self.hpolar(a, r)
                         verts.append((x, y, z))
                         cols.append(col)
                 for i in range(m):
@@ -432,9 +446,9 @@ class ArenaDecor:
         b.add_raw(np.array(verts), np.array(tris), np.tile((0.0, 1.0, 0.0), (len(verts), 1)), np.array(cols))
         for k in range(8):                                     # rivets le long des plaques
             for r in (6.7, 11.5):
-                x, z = polar(k * 45 + 22.5 * (r > 9) + 11, r, self.x0, self.z0)
+                x, z = self.hpolar(k * 45 + 22.5 * (r > 9) + 11, r)
                 b.add('cyl6', (x, .16, z), (.22, .03, .22), col=rgb(.7, .72, .78))
-        glow.add('ring_97', (self.x0, .15, self.z0), (18.1, .03, 18.1), col=blue)     # anneau lumineux intermédiaire
+        add_hex_band(glow, self.x0, .15, self.z0, 9.35, 8.75, .03, blue)                # anneau lumineux intermédiaire
         # plateau central surélevé
         self.disc(b, 4.3, .12, .12, rgb(.56, .59, .65), 'cyl_hi')
         glow.add('ring_thin', (self.x0, .19, self.z0), (7.2, .04, 7.2), col=blue)
@@ -456,10 +470,10 @@ class ArenaDecor:
             ang = back + off
             while self.near_gate(ang, 18):
                 ang += 8 if off >= 0 else -8
-            x, z = polar(ang, R + 5.6, self.x0, self.z0)
+            x, z = self.hpolar(ang, R + 5.6)
             tops.append(self._tesla_tower(x, z, ang, 7.5 if off == 0 else 6.2))
         self.st.arcs.add([(tops[0], tops[1]), (tops[1], tops[2]), (tops[0], tops[2])],
-                         ground=[(t, polar(a, R - 1, self.x0, self.z0)) for t, a in
+                         ground=[(t, self.hpolar(a, R - 1)) for t, a in
                                  zip(tops, (back - 30, back, back + 30))], y0=self.y0)
         # générateurs et pylônes autour, reliés par des câbles
         pylons = []
@@ -524,7 +538,7 @@ class ArenaDecor:
         self.disc(b, R + 3.6, .03, .06, marble)
         # canal d'eau autour du terrain (peu profond : on le traverse)
         self.disc(b, R + 2.4, .05, .06, rgb(.2, .45, .7))
-        self.st.wb.ring(self.x0, .12, self.z0, R + .7, R + 2.4, depth=.8, speed=.4)
+        self.st.wb.ring(self.x0, .12, self.z0, R + .7, R + 2.4, depth=.8, speed=.4, hexa=True)
         self.disc(b, R + .7, .08, .1, marble)
         # mosaïque de vagues
         cols = [rgb(.36, .6, .76), rgb(.56, .77, .86), rgb(.86, .91, .93), rgb(.27, .5, .68)]
@@ -533,14 +547,14 @@ class ArenaDecor:
             n = int(2 * math.pi * r / 1.05)
             for i in range(n):
                 ang = i * 360 / n
-                x, z = polar(ang, r, self.x0, self.z0)
+                x, z = self.hpolar(ang, r)
                 w = math.sin(math.radians(ang) * 6 + r * .9)
                 c = cols[0] if w < -.3 else cols[1] if w < .3 else cols[2] if w < .8 else cols[3]
                 b.add('box', (x, .15, z), (2 * math.pi * r / n * .9, .04, .95), rot=(0, ang, 0), col=c)
             r += 1.08
         # bassins peu profonds
         for k in range(4):
-            x, z = polar(k * 90 + 45, R * .6, self.x0, self.z0)
+            x, z = self.hpolar(k * 90 + 45, R * .6)
             b.add('cyl24', (x, .16, z), (4.6, .04, 4.6), col=deep)
             self.st.wb.disc(x, .2, z, 2.2, depth=.8, speed=.05)
             b.add('ring_thin', (x, .2, z), (4.8, .1, 4.8), col=marble)
@@ -561,7 +575,7 @@ class ArenaDecor:
         n = 16
         for i in range(n):
             ang = i * 360 / n + 11
-            x, z = polar(ang, R + 5, self.x0, self.z0)
+            x, z = self.hpolar(ang, R + 5)
             if self.near_gate(ang, 16) or not self.st._clear_of_lanes(x, z, 1.6) or self.st.blocked(x, z, .8):
                 continue
             b.add('cyl16', (x, 1.6, z), (.8, 3.2, .8), col=marble)
@@ -607,20 +621,21 @@ class ArenaDecor:
         lava, lava2 = rgb(1, .42, .06), rgb(1, .75, .2)
         self.disc(b, R + 3.6, .03, .06, rgb(.22, .19, .18))
         # douve de lave autour du terrain, franchie par de larges dalles aux entrées
-        self.st.wb.ring(self.x0, .075, self.z0, R + 1.5, R + 2.6, kind='lava', speed=.2)
+        self.st.wb.ring(self.x0, .075, self.z0, R + 1.5, R + 2.6, kind='lava', speed=.2, hexa=True)
         self.disc(b, R + 1.5, .065, .07, rgb(.17, .15, .15))
         for ang, w in self.gates:
             for k in range(3):
-                x, z = polar(ang, R + 1.6 + k * .6, self.x0, self.z0)
+                x, z = self.hpolar(ang, R + 1.6 + k * .6)
                 b.add('box', (x, .1, z), (w + 1.2, .12, .66), rot=(0, ang, 0), col=shade(BASALTS[0], rng.uniform(.9, 1.1)))
         # plaques de basalte : la lave brille dans les joints
-        self.st.wb.disc(self.x0, .1, self.z0, R + .2, kind='lava', flow=(.2, 0, .3), seg=64)
+        self.st.wb.disc(self.x0, .1, self.z0, R + .2, kind='lava', flow=(.2, 0, .3), seg=60, hexa=True)
         self.paving(R - .1, 1.9, .12, lambda x, z: shade(rng.choice(BASALTS), rng.uniform(.7, 1.0)), gap=.17, r_in=3.1)
         # bordure de colonnes de basalte basses (on marche dessus)
         n = 46
         for i in range(n):
             ang = i * 360 / n
-            x, z = polar(ang, R + .75, self.x0, self.z0)
+            x, z = self.hpolar(ang, R + .75)
+            ang = C.hex_normal(ang)                 # bordure alignée sur le côté de l'hexagone
             b.add('prism6', (x, .12, z), (1.15, .24 + rng.uniform(0, .08), 1.15), rot=(0, rng.uniform(0, 60), 0),
                   col=shade(rng.choice(BASALTS), rng.uniform(.8, 1.05)), cap=(rgb(.36, .33, .31), .5))
         self.disc(b, 3.0, .15, .07, rgb(.16, .13, .13))
@@ -642,7 +657,7 @@ class ArenaDecor:
         best = None
         for k in range(24):
             ang = k * 15
-            x, z = polar(ang, R + 8.5, self.x0, self.z0)
+            x, z = self.hpolar(ang, R + 8.5)
             if self.near_gate(ang, 25) or math.hypot(x, z) > C.FIELD_RADIUS - 6 or self.st.blocked(x, z, 3.2):
                 continue
             d = min(self.lane_gap(x, z), 12)
