@@ -109,8 +109,13 @@ le jouer (quand il en a plusieurs), **Entrée** pour valider, **Échap** pour re
   niveau 10. Les attaques visées à la souris frappent plus fort que celles à cible automatique.
 - **Argent (₽) et XP** : en mettant K.O. des adversaires, des Pokémon sauvages, des camps, des
   sbires, des tours, et en capturant des arènes. La boutique propose 10 objets (3 emplacements).
-- **Arènes** : une tour défensive se dresse peu après la capture ; la météo de l'arène (pluie,
-  soleil, tempête de sable...) s'installe sur le quartier au profit de l'équipe qui la tient.
+- **Carte tirée au hasard** : à chaque partie, le type des 5 arènes est tiré parmi les 18 types (5 différents) ;
+  l'arène, la jungle autour, son grand décor et sa météo suivent ce type. Le salon montre la carte
+  tirée (bandeau au-dessus des Pokémon, clic pour la voir en grand ; case dorée : la météo de l'arène
+  renforce votre Pokémon) et la construit déjà pendant que vous choisissez.
+- **Arènes** : dans le cercle, touche G pour capturer (immobile, mais la tour ne tire plus). Une tour
+  défensive se dresse peu après la capture ; la météo de l'arène (pluie, soleil, tempête de sable...)
+  s'installe sur le quartier au profit de l'équipe qui la tient.
 - **Voies** : chaque arène contrôlée envoie des vagues de sbires vers les arènes voisines.
 - **Jungle** : Magmar, Lokhlass et Héliatronc donnent des buffs ; les buissons de Baies Sitrus
   soignent puis repoussent au bout de 2 minutes.

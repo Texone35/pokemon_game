@@ -69,8 +69,11 @@ def run(role):
         lobby.cycle_build()                        # build Dragon
         step(10)
         lobby.toggle_ready()
-    wait(lambda: game.match is not None and game.match._warmup <= 0, 'début de la partie', 120)
+    wait(lambda: game.match is not None and game.match.enabled and game.match._warmup <= 0, 'début de la partie',
+         120)
     m = game.match
+    print(f"{role} : carte tirée {[(a['key'], a['type']) for a in m.arenas]}, "
+          f"{len(m.stadium.obstacles)} obstacles", flush=True)       # identique chez l'hôte et l'invité
     m.player.brain = Pilot(m.player, m)
     m.player.role = 'jungle'                       # va se battre contre les camps de la jungle
     m._build_slots()

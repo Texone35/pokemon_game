@@ -21,6 +21,8 @@ import math
 import numpy as np
 from ursina import Shader
 
+from game.world.geometry import on_main
+
 _LIGHT = """
 uniform struct {
     vec4 position;
@@ -254,6 +256,7 @@ class WaterBuilder:
             tris += [a, b, b + 1, a, b + 1, a + 1]
         return self.add_raw(v, tris, fl, dd, speed, kind, alpha)
 
+    @on_main
     def build(self, parent):
         """Crée le nœud (un seul appel de rendu) sous `parent`."""
         if not self.verts:

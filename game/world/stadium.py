@@ -2,19 +2,22 @@
 
 Disposition (voir config.py) : 5 arènes ouvertes (Nord, Ouest, Est, Sud-Ouest,
 Sud-Est ; l'Arène Nord est perchée sur un plateau, accessible par un escalier et des
-rampes là où arrivent les voies), les bases des deux équipes au sud, le Boss Pit au centre, une
+rampe là où arrive sa route, la seule qui mène au Boss Pit ; les autres arènes y mènent par des
+chemins de jungle), les bases des deux équipes au bord Ouest et Est (protégées par un champ de force
+que l'adversaire ne peut franchir), le Boss Pit au centre, une
 rivière peu profonde (praticable) du nord au sud, des voies principales et une
 jungle avec ses camps de Pokémon neutres. Le tout est entouré par les
 tribunes du stade.
 
 Jungle (façon MOBA) : des massifs infranchissables (falaises rocheuses ou
 rideaux d'arbres) séparés par des couloirs étroits et quelques clairières.
-Chaque zone a son biome (biomes.py) qui change le relief des massifs, les couleurs
-du sol et la végétation (plateau de grès au Nord, forêt luxuriante à l'Ouest,
-forêt et centrale électrique à l'Est, lagon au Sud-Ouest, champ volcanique au
-Sud-Est), et un grand décor repère (landmarks.py : volcan, cascades, arbre
-millénaire, tour Tesla, ruines...). Ni les biomes ni les grands décors ne
-touchent au tracé : murs, couloirs et buissons restent les mêmes.
+Le type de chaque arène est tiré en début de partie (config.draw_map) : la zone autour prend
+le biome de ce type (biomes.py : relief des massifs, couleurs du sol, végétation) et son grand
+décor repère (landmarks.py : volcan, cascades, arbre millénaire, tour Tesla...). Ni les biomes
+ni les grands décors ne touchent au tracé : murs, couloirs et buissons restent les mêmes.
+
+Construction : Stadium(root, build=False) puis build(), étape par étape (STEPS, self.progress) ;
+elle peut tourner dans un fil en arrière-plan pendant le salon (world/preload.py).
 Les couloirs sont les arêtes d'un diagramme de Voronoï dont les graines sont
 symétriques (Ouest / Est). Les murs sont décrits par une fonction distance
 signée (self.wall_sdf) qui sert à la fois aux collisions, à la navigation et
@@ -42,7 +45,7 @@ from game import config as C
 from game.world import biomes
 from game.world.emblems import add_emblem
 from game.world.fx import Arcs
-from game.world.geometry import ROCKS, ChunkedBuilder, MeshBuilder, _rot_matrix, glowing
+from game.world.geometry import ROCKS, ChunkedBuilder, MeshBuilder, _rot_matrix, breathe, glowing, on_main
 from game.world.water import WaterBuilder, river_surface, set_time
 
 F = C.FIELD_RADIUS
@@ -52,6 +55,7 @@ J_RES = .5            # finesse de la carte des murs et des buissons de la jungl
 CORRIDOR = 3.0        # demi-largeur des couloirs de la jungle
 SEED_GAP = 18.0       # écart entre les graines des massifs (plus grand = massifs plus gros)
 CLOSED_EDGES = .2    # part des couloirs possibles qui restent fermés
+BASE_SHIELD = C.BASE_RADIUS + 2.2   # rayon du champ de force d'une base (infranchissable pour l'adversaire)
 
 # ---------------------------------------------------------------- palette
 LANE = color.rgb(.72, .71, .68)
@@ -79,15 +83,28 @@ CLIFF = color.rgb(.5, .47, .44)
 BUSH_GREENS = [color.rgb(.2, .62, .42), color.rgb(.24, .68, .44), color.rgb(.17, .56, .4),
                color.rgb(.3, .7, .44)]
 GRASS_TIP = color.rgb(.62, .86, .42)           # bout des feuilles des hautes herbes, éclairé par le soleil
-# feuillages par biome (ordre de biomes.KEYS)
-GREENS = [TREE_GREENS,
-          [color.rgb(.36, .44, .2), color.rgb(.42, .46, .24), color.rgb(.3, .4, .18)],          # roche : olivier sec
-          [color.rgb(.1, .44, .12), color.rgb(.16, .52, .14), color.rgb(.08, .38, .14),
-           color.rgb(.22, .58, .16), color.rgb(.3, .62, .18)],                                   # plante : vert profond
-          TREE_GREENS,
-          [color.rgb(.12, .5, .36), color.rgb(.18, .56, .4), color.rgb(.1, .44, .38),
-           color.rgb(.24, .6, .36)],                                                             # eau : vert tendre
-          [color.rgb(.24, .28, .14), color.rgb(.3, .3, .16)]]                                    # feu : roussi
+# feuillages par type de biome (voir biomes.py)
+GREENS_T = {'jungle': TREE_GREENS,
+            'roche': [color.rgb(.36, .44, .2), color.rgb(.42, .46, .24), color.rgb(.3, .4, .18)],     # olivier sec
+            'plante': [color.rgb(.1, .44, .12), color.rgb(.16, .52, .14), color.rgb(.08, .38, .14),
+                       color.rgb(.22, .58, .16), color.rgb(.3, .62, .18)],                          # vert profond
+            'electrik': TREE_GREENS,
+            'eau': [color.rgb(.12, .5, .36), color.rgb(.18, .56, .4), color.rgb(.1, .44, .38),
+                    color.rgb(.24, .6, .36)],                                                       # vert tendre
+            'feu': [color.rgb(.24, .28, .14), color.rgb(.3, .3, .16)],                             # roussi
+            'normal': [color.rgb(.3, .55, .2), color.rgb(.38, .6, .22), color.rgb(.26, .5, .18)],
+            'glace': [color.rgb(.16, .34, .3), color.rgb(.2, .4, .34), color.rgb(.14, .3, .28)],
+            'combat': [color.rgb(.4, .6, .2), color.rgb(.46, .66, .24), color.rgb(.34, .54, .18)],
+            'poison': [color.rgb(.36, .24, .42), color.rgb(.3, .36, .18), color.rgb(.44, .3, .5)],
+            'sol': [color.rgb(.44, .46, .2), color.rgb(.5, .48, .24)],
+            'vol': [color.rgb(.36, .62, .3), color.rgb(.42, .68, .34), color.rgb(.5, .72, .38)],
+            'psy': [color.rgb(.7, .36, .62), color.rgb(.6, .3, .7), color.rgb(.8, .5, .75)],
+            'insecte': [color.rgb(.4, .56, .1), color.rgb(.46, .6, .14), color.rgb(.34, .5, .12)],
+            'spectre': [color.rgb(.24, .2, .32), color.rgb(.2, .24, .26), color.rgb(.3, .24, .36)],
+            'dragon': [color.rgb(.2, .36, .3), color.rgb(.24, .4, .34)],
+            'tenebres': [color.rgb(.16, .14, .22), color.rgb(.2, .16, .26), color.rgb(.14, .18, .2)],
+            'acier': [color.rgb(.3, .42, .32), color.rgb(.34, .46, .36)],
+            'fee': [color.rgb(.94, .6, .8), color.rgb(.6, .86, .6), color.rgb(.9, .74, .9), color.rgb(.5, .8, .6)]}
 BLOSSOM = [color.rgb(1, .66, .8), color.rgb(.98, .74, .86), color.rgb(.95, .58, .76), color.rgb(1, .82, .9)]
 CRYSTAL = [color.rgb(.45, .8, 1), color.rgb(.6, .9, 1), color.rgb(.55, .7, 1), color.rgb(.4, .95, .95)]
 VOLT = [color.rgb(1, .9, .35), color.rgb(1, .95, .55), color.rgb(.95, .82, .25)]
@@ -96,15 +113,29 @@ BASALTS = [BASALT, color.rgb(.36, .27, .23), color.rgb(.25, .23, .23), color.rgb
 OBSIDIAN = color.rgb(.14, .1, .18)
 SAND_TOP = color.rgb(.86, .76, .56)     # sable sur le dessus du grès
 ASH_TOP = color.rgb(.42, .39, .37)      # cendre sur le dessus du basalte
-# végétation du cœur des massifs, par biome : (densité, essences)
-FLORA = [
-    (1.0, ['broadleaf'] * 55 + ['conifer'] * 25 + ['tropical'] * 20 + ['outcrop'] * 4),
-    (.42, ['conifer'] * 4 + ['dry'] * 4 + ['sandstone'] * 3 + ['hoodoo'] * 2),
-    (1.0, ['broadleaf'] * 50 + ['tropical'] * 22 + ['fern'] * 16 + ['bush'] * 12 + ['outcrop'] * 3),
-    (1.0, ['broadleaf'] * 45 + ['conifer'] * 42 + ['tropical'] * 10 + ['outcrop'] * 4),
-    (.95, ['blossom'] * 34 + ['tropical'] * 30 + ['broadleaf'] * 18 + ['crystal'] * 12 + ['fern'] * 6),
-    (.55, ['dead'] * 40 + ['basalt'] * 30 + ['obsidian'] * 16 + ['vent'] * 8),
-]
+# végétation du cœur des massifs, par type de biome : (densité, essences)
+FLORA_T = {
+    'jungle': (1.0, ['broadleaf'] * 55 + ['conifer'] * 25 + ['tropical'] * 20 + ['outcrop'] * 4),
+    'roche': (.42, ['conifer'] * 4 + ['dry'] * 4 + ['sandstone'] * 3 + ['hoodoo'] * 2),
+    'plante': (1.0, ['broadleaf'] * 50 + ['tropical'] * 22 + ['fern'] * 16 + ['bush'] * 12 + ['outcrop'] * 3),
+    'electrik': (1.0, ['broadleaf'] * 45 + ['conifer'] * 42 + ['tropical'] * 10 + ['outcrop'] * 4),
+    'eau': (.95, ['blossom'] * 34 + ['tropical'] * 30 + ['broadleaf'] * 18 + ['crystal'] * 12 + ['fern'] * 6),
+    'feu': (.55, ['dead'] * 40 + ['basalt'] * 30 + ['obsidian'] * 16 + ['vent'] * 8),
+    # thèmes ajoutés (éléments de world/themes.py)
+    'normal': (.8, ['broadleaf'] * 45 + ['bush'] * 25 + ['haystack'] * 10 + ['outcrop'] * 3),
+    'glace': (.75, ['snow_pine'] * 50 + ['ice_spike'] * 25 + ['snow_rock'] * 12),
+    'combat': (.9, ['bamboo'] * 45 + ['broadleaf'] * 15 + ['training_post'] * 8 + ['outcrop'] * 4),
+    'poison': (.85, ['toxic_mushroom'] * 40 + ['dead'] * 20 + ['bubble_pool'] * 12 + ['fern'] * 10),
+    'sol': (.55, ['boulder'] * 30 + ['hoodoo'] * 12 + ['dry'] * 20 + ['cactus'] * 15),
+    'vol': (.75, ['wind_tree'] * 40 + ['conifer'] * 20 + ['wind_vane'] * 5 + ['outcrop'] * 4),
+    'psy': (.8, ['broadleaf'] * 30 + ['crystal_psy'] * 25 + ['floating_rock'] * 10 + ['blossom'] * 15),
+    'insecte': (1.0, ['broadleaf'] * 40 + ['web_tree'] * 20 + ['cocoon'] * 12 + ['fern'] * 15),
+    'spectre': (.7, ['dead'] * 25 + ['tombstone'] * 20 + ['ghost_tree'] * 30 + ['lantern'] * 4),
+    'dragon': (.6, ['dragon_crystal'] * 25 + ['conifer'] * 25 + ['bone'] * 10 + ['outcrop'] * 8),
+    'tenebres': (.85, ['dark_tree'] * 45 + ['thorn'] * 25 + ['dead'] * 10),
+    'acier': (.55, ['girder'] * 25 + ['gear'] * 15 + ['metal_block'] * 20 + ['conifer'] * 15),
+    'fee': (.9, ['blossom'] * 30 + ['giant_flower'] * 25 + ['fairy_mushroom'] * 20 + ['broadleaf'] * 15),
+}
 
 
 def seg_dist(px, pz, ax, az, bx, bz):
@@ -218,21 +249,20 @@ RB, BB = C.TEAMS['rouge']['base'], C.TEAMS['bleu']['base']
 
 # voies principales : (points, largeur)
 LANES = [
-    # grand anneau qui relie les arènes ; au sud, il passe au-dessus des bases (sans les traverser) :
-    # les deux arènes du bas sont reliées directement, loin des dégâts de la base adverse
-    ([A['nord'], (30, 80), (56, 64), A['est'], (86, -10), A['sud_est'], (62, -78), (36, -86), (0, -88)], 4.6),
-    ([A['nord'], (-30, 80), (-56, 64), A['ouest'], (-86, -10), A['sud_ouest'], (-62, -78), (-36, -86), (0, -88)],
+    # grand anneau qui relie les arènes (comme la Crystal Scar du mode Dominion) : Nord en haut, de chaque
+    # côté une arène au-dessus et une au-dessous de la base ; les deux arènes du bas sont reliées par le sud
+    ([A['nord'], (30, 80), (50, 68), A['est'], (78, 22), (82, -6), (74, -34), A['sud_est'], (24, -84), (0, -90)],
      4.6),
-    # bretelles : chaque base rejoint l'anneau juste au-dessus d'elle
-    ([RB, (-36, -86)], 4.6),
-    ([BB, (36, -86)], 4.6),
-    # voie centrale Ouest - Boss Pit - Est
-    ([(-106, -5), (-60, -5), (-14, -5)], 5.0),
-    ([(14, -5), (60, -5), (106, -5)], 5.0),
-    # voie verticale Nord - Boss Pit - bas
-    ([(0, 14), (0, 40), (0, 68)], 3.6),
-    ([(0, -14), (0, -88)], 3.6),
+    ([A['nord'], (-30, 80), (-50, 68), A['ouest'], (-78, 22), (-82, -6), (-74, -34), A['sud_ouest'], (-24, -84),
+      (0, -90)], 4.6),
+    # bretelles : chaque base (au bord du terrain, à l'écart de l'anneau) rejoint l'anneau
+    ([RB, (-80, -14)], 4.6),
+    ([BB, (80, -14)], 4.6),
 ]
+
+# Aucune arène n'a de chemin tracé vers le Boss Pit : on y va par les couloirs de la jungle (sinueux,
+# voir _plan_jungle). Tout ce qui doit rester dégagé (décor des arènes, portes, tribunes) :
+ROUTES = LANES
 
 # arènes perchées sur un plateau : clé -> (hauteur, longueur des rampes d'accès)
 PLATEAUS = {'nord': (2.3, 7.5)}
@@ -251,7 +281,19 @@ RIVERS = [
 
 
 class Stadium:
-    def __init__(self, root):
+    # étapes de la construction : (méthode, part du temps total, libellé de l'écran de chargement)
+    STEPS = (('_plan_paths', .01, 'Tracé des voies'), ('_plan_jungle', .08, 'Tracé de la jungle'),
+             ('_plan_biomes', .02, 'Biomes des arènes'), ('_build_heightmap', .04, 'Relief'),
+             ('_new_builders', .01, 'Relief'), ('_build_ground', .08, 'Sol et sentiers'),
+             ('_build_lanes', .04, 'Voies'), ('_build_river', .06, 'Rivière'), ('_build_stands', .1, 'Tribunes'),
+             ('_build_plateaus', .02, 'Plateau du Nord'), ('_build_arenas', .05, 'Arènes'),
+             ('_build_bases', .01, 'Bases'), ('_build_pit', .01, 'Boss Pit'), ('_build_camps', .01, 'Camps'),
+             ('_build_jungle', .38, 'Végétation de la jungle'), ('_build_landmarks', .01, 'Grands décors'),
+             ('_flush', .06, 'Assemblage des décors'), ('_build_nav', .01, 'Navigation'))
+
+    def __init__(self, root, build=True):
+        """Carte du stade sous `root`. build=False : rien n'est construit, appeler build() (par exemple
+        dans un fil en arrière-plan, voir world/preload.py)."""
         self.root = root
         self.rng = random.Random(11)
         self.obstacles = []
@@ -261,30 +303,51 @@ class Stadium:
         self.wb = WaterBuilder()     # eau et lave animées (un seul maillage, voir water.py)
         self.emitters = []           # sources de particules du décor : (x, y, z, genre, taille)
         self.time = 0.0
-        self._plan_paths()
-        self._plan_jungle()
+        self.progress, self.step_label = 0.0, ''
+        self.layout = {a['key']: a['type'] for a in C.ARENAS}       # types tirés pour cette partie
+        self.arcs = Arcs(self.root, random.Random(5))
+        if build:
+            self.build()
+
+    def build(self):
+        """Construit toute la carte, étape par étape (self.progress va de 0 à 1)."""
+        done = 0.0
+        for name, part, label in self.STEPS:
+            self.step_label = label
+            self._step = (done, part)
+            breathe()
+            getattr(self, name)()
+            done += part
+            self.progress = min(1.0, done)
+        self.progress = 1.0
+
+    def _sub(self, frac):
+        """Avancement à l'intérieur d'une longue étape (frac de 0 à 1)."""
+        base, part = self._step
+        self.progress = base + part * frac
+        breathe()
+
+    def _plan_biomes(self):
+        from game.world import themes
+        self.themes = themes                 # éléments, bords de massifs et grands décors des thèmes ajoutés
+        biomes.set_layout(self.layout)
+        self.greens, self.flora = biomes.by_slot(GREENS_T), biomes.by_slot(FLORA_T)
+        t = self.layout['nord']                 # falaises du plateau Nord : grès, ou roche du type tiré
+        if t == 'roche':
+            self.strata, self.strata_top = biomes.STRATA, SAND_TOP
+        else:
+            base = biomes.ROCK_T[t]
+            self.strata = [tuple(min(1.0, c * k) for c in base) for k in (.82, .92, 1.0, 1.1)]
+            self.strata_top = color.rgb(*biomes.LAWN_T[t][0])
         self.biome = biomes.BiomeMap(F + 6)
         self.terrain_marks = []          # (x, z, rayon, profil) : reliefs ajoutés par les grands décors
         from game.world.landmarks import Landmarks
         self.landmarks = Landmarks(self)
         self.landmarks.plan()
         self._plan_plateaus()
-        self._build_heightmap()
-        self._new_builders()
-        self._build_ground()
-        self._build_lanes()
-        self._build_river()
-        self._build_stands()
-        self._build_plateaus()
-        self.arcs = Arcs(self.root, random.Random(5))
-        self._build_arenas()
-        self._build_bases()
-        self._build_pit()
-        self._build_camps()
-        self._build_jungle()
+
+    def _build_landmarks(self):
         self.landmarks.build()
-        self._flush()
-        self._build_nav()
 
     def _flush(self):
         """Transforme les constructeurs restants en entités (quelques gros maillages)."""
@@ -346,13 +409,26 @@ class Stadium:
         i, j, tx, tz = self._jcell(x, z)
         return int(self.bush_grid[i + (tx > .5), j + (tz > .5)])
 
-    def collide(self, pos, radius=.5):
-        """Repousse la position hors des obstacles et dans le terrain."""
+    def collide(self, pos, radius=.5, team=None):
+        """Repousse la position hors des obstacles et dans le terrain (et, pour un Pokémon d'équipe,
+        hors de la base adverse : un champ de force en ferme l'entrée)."""
         lim = F - 1 - radius
         r = math.hypot(pos.x, pos.z)
         if r > lim:
             pos.x *= lim / r
             pos.z *= lim / r
+        if team is not None:
+            for key, t in C.TEAMS.items():
+                if key != team:
+                    bx, bz = t['base']
+                    dx, dz = pos.x - bx, pos.z - bz
+                    d = math.hypot(dx, dz)
+                    m = BASE_SHIELD + radius
+                    if d < m:
+                        if d < 1e-6:                               # (au centre : vers le milieu du terrain)
+                            dx, dz, d = -bx, -bz, math.hypot(bx, bz)
+                        pos.x = bx + dx / d * m
+                        pos.z = bz + dz / d * m
         for _ in range(2):              # murs de la jungle : on glisse le long de leur bord
             s = self.wall_dist(pos.x, pos.z) + radius
             if s <= 0:
@@ -583,7 +659,7 @@ class Stadium:
         self.bush_grid = lab.astype(np.int32)
 
     def _clear_of_lanes(self, x, z, m):
-        return all(polyline_dist(x, z, pts) > w / 2 + m for pts, w in LANES)
+        return all(polyline_dist(x, z, pts) > w / 2 + m for pts, w in ROUTES)
 
     # ================================================================ outils
     def _ribbon(self, b, pts, width, col, y, h=.04, disc=True):
@@ -631,7 +707,7 @@ class Stadium:
         for camp in C.CAMPS:
             x0, z0 = camp['pos']
             best = None
-            for pts, w in LANES + RIVERS:
+            for pts, w in ROUTES + RIVERS:
                 for (ax, az), (bx, bz) in zip(pts, pts[1:]):
                     dx, dz = bx - ax, bz - az
                     L2 = dx * dx + dz * dz or 1
@@ -685,8 +761,8 @@ class Stadium:
         ridge = 1 - np.abs(np.sin(X * .16 + np.sin(Z * .11) * 1.8) * np.cos(Z * .14 + np.sin(X * .09) * 1.4))
         volcanic = wall * (1.5 + ridge ** 2 * 2.6 + big * .35) - 1.4 * _lava_np(X, Z, sdf)
         lagoon = wall * (1.0 + big * .6)
-        massif = (Wb[..., biomes.JUNGLE] * hill + Wb[..., biomes.ROCHE] * mesa + Wb[..., biomes.PLANTE] * hill * 1.1
-                  + Wb[..., biomes.ELECTRIK] * hill + Wb[..., biomes.EAU] * lagoon + Wb[..., biomes.FEU] * volcanic)
+        profile = {'hill': hill, 'mesa': mesa, 'lagoon': lagoon, 'volcanic': volcanic}
+        massif = sum(Wb[..., k] * profile[r] for k, r in enumerate(biomes.by_slot(biomes.RELIEF_T)))
         jungle = _smoothstep(1.5, 9, open_d)
         lawn = _smoothstep(.8, 4.5, np.minimum(flat_d, river_d + 2))
         H = amp * (massif + bumps * (.35 * lawn + .3 * jungle))
@@ -759,7 +835,7 @@ class Stadium:
                         + .15 * np.sin(x * .45 + z * .38), 0, 1)[..., None]
         noise2 = np.clip(.5 + .5 * np.sin(x * .31 + np.cos(z * .23) * 2.5) * np.sin(z * .27 + x * .05), 0, 1)[..., None]
         open_d, river_d, _, _ = self._fields_np(x, z)
-        W = biomes.weights_np(x, z)[..., None]                 # (…, 6, 1)
+        W = biomes.weights_np(x, z)[..., None]                 # (…, 7, 1)
         wf, wr = W[..., biomes.FEU, :], W[..., biomes.ROCHE, :]
 
         def palette(pal, t):
@@ -775,10 +851,15 @@ class Stadium:
         lawn = lawn * (1 - sand) + np.array(biomes.BANK[biomes.EAU]) * sand
         forest = palette(biomes.FOREST, noise2[..., 0])
         col = lawn * (1 - jungle) + forest * jungle
-        # couloirs de la jungle : sentier de terre au milieu, mousse au pied des murs
+        # couloirs de la jungle : sentier de terre battue bien visible au milieu, bordé d'une ligne de
+        # cailloux plus sombre, puis mousse au pied des murs (on distingue d'un coup d'œil où passer)
         wsd = self._jsample_np(self.wall_sdf, x, z)
-        trail = jungle * (1 - _smoothstep(-2.6, -.8, wsd))[..., None] * (.35 + .25 * noise)
-        col = col * (1 - trail) + (np.array([.42, .34, .22]) * (1 - wf) + np.array([.23, .19, .17]) * wf) * trail
+        trail_col = palette(biomes.TRAIL_DIRT, noise[..., 0] * .4) * (.93 + .1 * noise2)
+        edge_col = palette(biomes.TRAIL_EDGE, noise2[..., 0])
+        core = jungle * (1 - _smoothstep(-2.3, -1.6, wsd))[..., None] * .92
+        rim = jungle * (_smoothstep(-2.5, -1.9, wsd) * (1 - _smoothstep(-1.6, -1.1, wsd)))[..., None] * .75
+        col = col * (1 - core) + trail_col * core
+        col = col * (1 - rim) + edge_col * rim
         moss = (_smoothstep(-1.2, .5, wsd) * .5)[..., None] * (1 - wf - wr)
         col = col * (1 - moss) + np.array([.17, .32, .13]) * moss
         # pentes raides : roche nue (strates colorées du grès sur le plateau Nord)
@@ -899,15 +980,17 @@ class Stadium:
         b = self.b
         for pts, w in self.paths:
             self._ribbon(b, pts, w, PATH, .03, h=.04)
-            (ax, az), (bx, bz) = pts[0], pts[-1]
-            L = math.hypot(bx - ax, bz - az) or 1
-            for k in range(int(L / 2.2)):
-                t = (k + .5) * 2.2 / L
-                for s in (-1, 1):
-                    qx = ax + (bx - ax) * t + (bz - az) / L * s * (w / 2 + .3)
-                    qz = az + (bz - az) * t - (bx - ax) / L * s * (w / 2 + .3)
-                    b.add('sphere_lo', (qx, .08, qz), (.45, .25, .4), rot=(0, self.rng.uniform(0, 180), 0),
-                          col=shade(ROCK, self.rng.uniform(.85, 1.1)))
+            for (ax, az), (bx, bz) in zip(pts, pts[1:]):
+                L = math.hypot(bx - ax, bz - az) or 1
+                for k in range(int(L / 2.2)):
+                    t = (k + .5) * 2.2 / L
+                    for s in (-1, 1):
+                        qx = ax + (bx - ax) * t + (bz - az) / L * s * (w / 2 + .3)
+                        qz = az + (bz - az) * t - (bx - ax) / L * s * (w / 2 + .3)
+                        if any(polyline_dist(qx, qz, rp) < rw / 2 + .4 for rp, rw in RIVERS):
+                            continue                # le chemin passe le gué : pas de cailloux dans l'eau
+                        b.add('sphere_lo', (qx, .08, qz), (.45, .25, .4), rot=(0, self.rng.uniform(0, 180), 0),
+                              col=shade(ROCK, self.rng.uniform(.85, 1.1)))
         self._build_bridges(lanes)
 
     def _inside_open_disc(self, x, z):
@@ -1148,7 +1231,7 @@ class Stadium:
                     b.add(rng.choice(('prism6', 'prism5')), (x, hc / 2 - self.ground_y(x, z) - .15, z),
                           (rng.uniform(1.35, 1.85), hc + .3, rng.uniform(1.2, 1.6)),
                           rot=(rng.uniform(-3, 3), rng.uniform(0, 60), rng.uniform(-3, 3)),
-                          col=shade(rng.choice(biomes.STRATA), rng.uniform(.8, 1.0)), grad=.5, cap=(SAND_TOP, .75))
+                          col=shade(rng.choice(self.strata), rng.uniform(.8, 1.0)), grad=.5, cap=(self.strata_top, .75))
             for k in range(26):                           # blocs tombés au pied des falaises
                 ang = rng.uniform(0, 360)
                 if self._in_gate(p, ang, 2.5):
@@ -1156,7 +1239,7 @@ class Stadium:
                 x, z = polar(ang, rp + rng.uniform(2.3, 3.6), x0, z0)
                 t = rng.uniform(.4, .9)
                 b.add(rng.choice(ROCKS), (x, t * .3, z), (t * 1.7, t * 1.1, t * 1.4), rot=(0, rng.uniform(0, 360), 0),
-                      col=shade(rng.choice(biomes.STRATA), rng.uniform(.8, 1.0)), grad=.3, cap=(SAND_TOP, .5))
+                      col=shade(rng.choice(self.strata), rng.uniform(.8, 1.0)), grad=.3, cap=(self.strata_top, .5))
             centre = math.degrees(math.atan2(-x0, -z0))  # l'escalier regarde le centre de la carte
             stairs = min(p['gates'], key=lambda g: abs((g[0] - centre + 180) % 360 - 180))[0]
             for ang, half in p['gates']:
@@ -1195,7 +1278,7 @@ class Stadium:
                 z = z0 + uz * (rp + L * t * .8) + pz * side * (half + 1.4)
                 r = rng.uniform(.35, .55)
                 self.b.add(rng.choice(ROCKS), (x, r * .3, z), (r * 1.6, r * 1.1, r * 1.4), rot=(0, rng.uniform(0, 360), 0),
-                           col=shade(rng.choice(biomes.STRATA), rng.uniform(.8, 1.0)), grad=.3, cap=(SAND_TOP, .5))
+                           col=shade(rng.choice(self.strata), rng.uniform(.8, 1.0)), grad=.3, cap=(self.strata_top, .5))
 
     def _plateau_spring(self, p, fall, rng):
         """La source de la rivière : un filet d'eau qui tombe du plateau dans son lit."""
@@ -1227,7 +1310,7 @@ class Stadium:
             back = math.degrees(math.atan2(x0, z0))
             if a['type'] == 'electrik' and abs((ang - back + 180) % 360 - 180) < 62:
                 continue                  # place des tours Tesla, au fond de l'arène
-            d = min(polyline_dist(x, z, pts) - w / 2 for pts, w in LANES)
+            d = min(polyline_dist(x, z, pts) - w / 2 for pts, w in ROUTES)
             cands.append((d, ang))
         cands.sort(reverse=True)
         chosen = []
@@ -1279,6 +1362,11 @@ class Stadium:
             b.add('box', (bx, .17, bz), (5.6, .03, .35), col=color.rgb(.1, .1, .12))
             b.add('cyl_hi', (bx, .175, bz), (1.5, .03, 1.5), col=color.rgb(.1, .1, .12))
             glow.add('cyl_hi', (bx, .18, bz), (1, .03, 1), col=color.white)
+            # champ de force : bornes lumineuses sur le bord (l'adversaire ne peut pas entrer)
+            for i in range(24):
+                x, z = polar(i * 15, BASE_SHIELD, bx, bz)
+                b.add('cyl8', (x, .35, z), (.35, .7, .35), col=color.rgb(.3, .32, .38))
+                glow.add('cyl8', (x, 1.2, z), (.18, 1.0, .18), col=tl)
             # cristaux de soin
             for i in range(4):
                 x, z = polar(i * 90 + 45, R - 1.2, bx, bz)
@@ -1343,8 +1431,8 @@ class Stadium:
                   col=glowing(lerp(purple, color.white, k * .12), .85))
         v.add('sphere', (0, .4, 0), 1.1, col=glowing(color.rgb(.35, .12, .55), .6))
         self.vortex = v.static(self.root)
-        self.vortex.set_pos(0, 10.5, 0)
-        self.vortex.hide()                # il tourne : on le montre après le calcul (figé) des ombres
+        on_main(lambda: (self.vortex.set_pos(0, 10.5, 0),
+                         self.vortex.hide()))()  # il tourne : on le montre après le calcul (figé) des ombres
 
     def _gate_angles(self, x0, z0, r, margin=1.0):
         """Angles (vus de (x0, z0)) où une voie coupe le cercle de rayon r : [(angle, largeur)]."""
@@ -1352,7 +1440,7 @@ class Stadium:
         for k in range(180):
             ang = k * 2
             x, z = polar(ang, r, x0, z0)
-            w = next((w for pts, w in LANES if polyline_dist(x, z, pts) < w / 2 + margin), None)
+            w = next((w for pts, w in ROUTES if polyline_dist(x, z, pts) < w / 2 + margin), None)
             hits.append((ang, w))
         gates, group = [], []
         start = next((i for i, (_, w) in enumerate(hits) if w is None), 0)
@@ -1505,8 +1593,10 @@ class Stadium:
 
     def _tree(self, b, x, z, s, kind, bio=biomes.JUNGLE):
         rng = self.rng
+        if kind in self.themes.PROPS:   # éléments des thèmes ajoutés (glace, poison, spectre...)
+            return self.themes.prop(b, kind, x, z, s, rng)
         bark = color.rgb(.46, .31, .19)
-        greens = GREENS[bio]
+        greens = self.greens[bio]
         if kind == 'blossom':           # arbre en fleurs (lagon)
             tx, tz = self._trunk(b, x, z, s * .9, 2.8 * s, color.rgb(.44, .3, .25))
             self._canopy(b, tx, 3.4 * s, tz, 1.4 * s, 1.2 * s, rng.choice(BLOSSOM), n=6, leafy=False)
@@ -1524,7 +1614,7 @@ class Stadium:
                 b.add('blob', (x + .5 * s, .1, z), (.7 * s, .25, .6 * s), col=glowing(biomes.LAVA, .7), wobble=.2)
             return .5 * s
         if kind == 'dry':               # touffe d'herbe sèche et arbuste épineux
-            g = rng.choice(GREENS[biomes.ROCHE])
+            g = rng.choice(GREENS_T['roche'])
             b.add('blob', (x, .45 * s, z), (1.9 * s, 1.1 * s, 1.9 * s), col=g, wobble=.3, grad=.45)
             for _ in range(4):
                 h = rng.uniform(.8, 1.4) * s
@@ -1689,11 +1779,11 @@ class Stadium:
             self._rock(b, x - nx * .5 + nz * rng.uniform(-1, 1), z - nz * .5 - nx * rng.uniform(-1, 1),
                        rng.uniform(.3, .55), moss=.3)
 
-    def _grove(self, b, x, z, nx, nz, k, bio=biomes.JUNGLE):
-        """Rideau d'arbres : troncs serrés derrière une haie épaisse et des racines."""
+    def _grove(self, b, x, z, nx, nz, k, bio=biomes.JUNGLE, kinds=None):
+        """Rideau d'arbres : troncs serrés derrière une haie épaisse et des racines (essences : `kinds`)."""
         rng = self.rng
         yaw = math.degrees(math.atan2(nx, nz))
-        g = rng.choice(GREENS[bio])
+        g = rng.choice(self.greens[bio])
         for j in (-1, 1):                # haie : deux touffes serrées
             t = rng.uniform(.3, .9) * j
             d = .6 + rng.uniform(0, .5)
@@ -1704,17 +1794,22 @@ class Stadium:
             b.add('blob', (x + nx * .1, .3, z + nz * .1), (1.6, .6, 1.0), rot=(0, yaw, 0),
                   col=color.rgb(.36, .25, .15), wobble=.25, grad=.3)
         if k % 2 == 0:
-            kinds = {biomes.EAU: ('blossom', 'tropical', 'broadleaf'),
-                     biomes.PLANTE: ('broadleaf', 'broadleaf', 'tropical')}.get(bio, ('broadleaf', 'conifer'))
+            kinds = kinds or {biomes.EAU: ('blossom', 'tropical', 'broadleaf'),
+                              biomes.PLANTE: ('broadleaf', 'broadleaf', 'tropical')}.get(bio, ('broadleaf', 'conifer'))
             self._tree(b, x + nx * 1.9, z + nz * 1.9, rng.uniform(1.0, 1.35), rng.choice(kinds), bio)
 
     def _build_jungle(self):
         rng = self.rng
         b = self.b
         # bords des massifs : falaises ou rideaux d'arbres selon la région et le biome
-        for k, (x, z, nx, nz) in enumerate(self._wall_points(1.9)):
+        wall = self._wall_points(1.9)
+        for k, (x, z, nx, nz) in enumerate(wall):
+            if k % 64 == 0:
+                self._sub(.45 * k / len(wall))
             bio = self.biome.pick(rng, x, z)
-            if bio == biomes.ROCHE:
+            if biomes.KEYS[bio] in self.themes.WALL:
+                self.themes.wall(self, b, x, z, nx, nz, k, bio, biomes.KEYS[bio])
+            elif bio == biomes.ROCHE:
                 self._mesa_foot(b, x, z, nx, nz, k)
             elif bio == biomes.FEU:
                 self._basalt_wall(b, x, z, nx, nz, k)
@@ -1742,13 +1837,14 @@ class Stadium:
         S = C.QUALITY['tree_spacing']
         n = int(F / S)
         for i in range(-n, n + 1):
+            self._sub(.45 + .5 * (i + n) / (2 * n + 1))
             for j in range(-n, n + 1):
                 x = i * S + rng.uniform(-S * .38, S * .38)
                 z = j * S + rng.uniform(-S * .38, S * .38)
                 if math.hypot(x, z) > F - 3 or self.wall_dist(x, z) < 2.6 or self.landmarks.reserved(x, z):
                     continue
                 bio = self.biome.pick(rng, x, z)
-                density, kinds = FLORA[bio]
+                density, kinds = self.flora[bio]
                 if rng.random() > density:
                     continue
                 kind = rng.choice(kinds)

@@ -5,6 +5,37 @@ from pathlib import Path
 from ursina import Entity, Quad, Text, application, color
 
 
+def _cache_fonts():
+    """Ursina recharge la police à chaque texte créé (et vide le cache de ses lettres) : ~20 ms par texte,
+    de plus en plus avec le temps. On garde chaque police prête une fois pour toutes (chargement des
+    parties : une barre de vie par Pokémon, l'interface...)."""
+    original = Text.font.fset
+    cache = {}
+
+    def font_setter(self, value):
+        font = cache.get(value)              # (la police est de toute façon partagée par tous ses textes)
+        if font is None:
+            original(self, value)
+            cache[value] = getattr(self, '_font', None)
+            return
+        self._font = font
+        if self.text:
+            self.text = self.raw_text
+
+    set_resolution = Text.resolution.fset
+
+    def resolution_setter(self, value):      # (Panda3D refuse de la changer une fois des lettres créées)
+        if self._font.getPixelsPerUnit() != value:
+            self._font.clear()
+            set_resolution(self, value)
+
+    Text.font = property(Text.font.fget, font_setter)
+    Text.resolution = property(Text.resolution.fget, resolution_setter)
+
+
+_cache_fonts()
+
+
 def _font(name):
     """Police Windows si elle existe (Segoe UI), sinon celle d'Ursina par défaut."""
     folder = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts'

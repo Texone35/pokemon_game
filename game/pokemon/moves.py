@@ -53,7 +53,7 @@ def blink_target(m, u, d, distance):
         dest -= d * .8                            # on s'arrête avant le mur
     else:
         dest = here
-    p = st.collide(Vec3(dest.x, 0, dest.z), u.radius)
+    p = st.collide(Vec3(dest.x, 0, dest.z), u.radius, u.team)
     p.y = st.walk_y(p.x, p.z)
     return p
 

@@ -51,7 +51,7 @@ class ArenaCard(Entity):
         self.enabled = True
         self._mode('arena')
         tcol = types[a['type']]['light']
-        _set(self.title, f"{a['name'].upper()}  ·  {types[a['type']]['name']}")
+        _set(self.title, f"{a['name'].upper()}  ·  {a.get('place') or types[a['type']]['name']}")
         self.title.color = tcol
         self.card.set_accent(tcol)
         c = a['control']

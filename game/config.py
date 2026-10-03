@@ -55,18 +55,35 @@ TREE_SPACING = 4.2             # densité de la jungle
 
 TEAMS = {
     'rouge': {'name': 'Rouge', 'color': color.rgb(.92, .2, .2), 'light': color.rgb(1, .55, .5),
-              'base': (-36, -102)},
+              'base': (-104, -18)},
     'bleu': {'name': 'Bleue', 'color': color.rgb(.2, .45, .95), 'light': color.rgb(.55, .75, 1),
-             'base': (36, -102)},
+             'base': (104, -18)},
 }
 
 ARENAS = [
-    {'key': 'nord', 'name': 'Arène Nord', 'type': 'roche', 'pos': (0, 82), 'weather': 'sable'},
-    {'key': 'ouest', 'name': 'Arène Ouest', 'type': 'plante', 'pos': (-77, 22), 'weather': 'pollen'},
-    {'key': 'est', 'name': 'Arène Est', 'type': 'electrik', 'pos': (77, 22), 'weather': 'orage'},
-    {'key': 'sud_ouest', 'name': 'Arène Sud-Ouest', 'type': 'eau', 'pos': (-74, -42), 'weather': 'pluie'},
-    {'key': 'sud_est', 'name': 'Arène Sud-Est', 'type': 'feu', 'pos': (74, -42), 'weather': 'soleil'},
+    {'key': 'nord', 'place': 'Nord', 'name': 'Arène Nord', 'type': 'roche', 'pos': (0, 82), 'weather': 'sable'},
+    {'key': 'ouest', 'place': 'Ouest', 'name': 'Arène Ouest', 'type': 'plante', 'pos': (-60, 50), 'weather': 'pollen'},
+    {'key': 'est', 'place': 'Est', 'name': 'Arène Est', 'type': 'electrik', 'pos': (60, 50), 'weather': 'orage'},
+    {'key': 'sud_ouest', 'place': 'Sud-Ouest', 'name': 'Arène Sud-Ouest', 'type': 'eau', 'pos': (-46, -66), 'weather': 'pluie'},
+    {'key': 'sud_est', 'place': 'Sud-Est', 'name': 'Arène Sud-Est', 'type': 'feu', 'pos': (46, -66), 'weather': 'soleil'},
 ]
+
+
+
+def draw_map(seed):
+    """Tirage de la carte d'une partie : type de chaque arène (5 types différents), le même sur
+    les deux PC pour une même graine (celle du salon)."""
+    import random
+    types = random.Random(seed * 7919 + 101).sample(ARENA_TYPES, len(ARENAS))
+    return {a['key']: t for a, t in zip(ARENAS, types)}
+
+
+def apply_map(types):
+    """Installe la carte tirée : type, météo et nom de chaque arène (avant de construire le stade)."""
+    for a in ARENAS:
+        t = types[a['key']]
+        a['type'], a['weather'], a['name'] = t, WEATHER_OF[t], 'Arène ' + TYPES[t]['name']
+
 
 ZONE_NAMES = {'eau': 'Arène Eau', 'feu': 'Arène Feu', 'plante': 'Arène Plante', 'electrik': 'Arène Électrik',
               'roche': 'Arène Roche', 'riviere': 'Rivière'}
@@ -136,7 +153,21 @@ TYPES = {
     'spectre': {'name': 'Spectre', 'color': color.rgb(.45, .3, .68), 'light': color.rgb(.72, .58, .95),
                 'dark': color.rgb(.18, .1, .3), 'floor': color.rgb(.35, .28, .45)},
     'dragon': {'name': 'Dragon', 'color': color.rgb(.38, .35, .95), 'light': color.rgb(.65, .62, 1),
-               'dark': color.rgb(.12, .1, .4), 'floor': color.rgb(.35, .35, .6)},
+            'dark': color.rgb(.12, .1, .4), 'floor': color.rgb(.35, .35, .6)},
+    'insecte': {'name': 'Insecte', 'color': color.rgb(.62, .75, .12), 'light': color.rgb(.82, .92, .4),
+                'dark': color.rgb(.25, .32, .05), 'floor': color.rgb(.5, .58, .25)},
+    'poison': {'name': 'Poison', 'color': color.rgb(.65, .3, .75), 'light': color.rgb(.85, .6, .95),
+               'dark': color.rgb(.28, .1, .32), 'floor': color.rgb(.42, .3, .45)},
+    'sol': {'name': 'Sol', 'color': color.rgb(.85, .66, .35), 'light': color.rgb(.95, .82, .55),
+            'dark': color.rgb(.42, .3, .14), 'floor': color.rgb(.66, .52, .32)},
+    'vol': {'name': 'Vol', 'color': color.rgb(.55, .68, .98), 'light': color.rgb(.8, .88, 1),
+            'dark': color.rgb(.2, .28, .5), 'floor': color.rgb(.62, .7, .85)},
+    'tenebres': {'name': 'Ténèbres', 'color': color.rgb(.4, .32, .3), 'light': color.rgb(.7, .58, .55),
+                 'dark': color.rgb(.12, .09, .09), 'floor': color.rgb(.25, .22, .22)},
+    'acier': {'name': 'Acier', 'color': color.rgb(.62, .66, .76), 'light': color.rgb(.85, .88, .95),
+              'dark': color.rgb(.25, .28, .34), 'floor': color.rgb(.55, .58, .64)},
+    'fee': {'name': 'Fée', 'color': color.rgb(.95, .55, .8), 'light': color.rgb(1, .8, .92),
+            'dark': color.rgb(.45, .18, .35), 'floor': color.rgb(.85, .66, .78)},
 }
 
 # ---------------------------------------------------------------- espèces

@@ -57,18 +57,18 @@ BUFFS = {
 # Camps symétriques (Ouest / Est). 'buff' : bonus pour le Pokémon qui achève le camp.
 # 'xp' et 'gold' : partagés entre les Pokémon du camp (chacun rapporte sa part à qui l'achève).
 CAMPS = [
-    {'species': 'magmar', 'pos': (-50, 55), 'buff': 'braise', 'respawn': 90, 'xp': 120, 'gold': 200, 'points': 10},
-    {'species': 'magmar', 'pos': (50, 55), 'buff': 'braise', 'respawn': 90, 'xp': 120, 'gold': 200, 'points': 10},
+    {'species': 'magmar', 'pos': (-82, 46), 'buff': 'braise', 'respawn': 90, 'xp': 120, 'gold': 200, 'points': 10},
+    {'species': 'magmar', 'pos': (82, 46), 'buff': 'braise', 'respawn': 90, 'xp': 120, 'gold': 200, 'points': 10},
     {'species': 'lokhlass', 'pos': (-34, -30), 'buff': 'flux', 'respawn': 90, 'xp': 120, 'gold': 200, 'points': 10},
     {'species': 'lokhlass', 'pos': (34, -30), 'buff': 'flux', 'respawn': 90, 'xp': 120, 'gold': 200, 'points': 10},
     {'species': 'heliatronc', 'pos': (-24, 42), 'buff': 'seve', 'respawn': 90, 'xp': 120, 'gold': 200, 'points': 10},
     {'species': 'heliatronc', 'pos': (24, 42), 'buff': 'seve', 'respawn': 90, 'xp': 120, 'gold': 200, 'points': 10},
     {'species': 'rattata', 'count': 3, 'pos': (-58, -16), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
     {'species': 'rattata', 'count': 3, 'pos': (58, -16), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
-    {'species': 'rattata', 'count': 3, 'pos': (-50, -72), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
-    {'species': 'rattata', 'count': 3, 'pos': (50, -72), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
-    {'species': 'rattata', 'count': 3, 'pos': (-86, 58), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
-    {'species': 'rattata', 'count': 3, 'pos': (86, 58), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
+    {'species': 'rattata', 'count': 3, 'pos': (-56, -36), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
+    {'species': 'rattata', 'count': 3, 'pos': (56, -36), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
+    {'species': 'rattata', 'count': 3, 'pos': (-64, 82), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
+    {'species': 'rattata', 'count': 3, 'pos': (64, 82), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
     {'species': 'rattata', 'count': 2, 'pos': (-24, 70), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
     {'species': 'rattata', 'count': 2, 'pos': (24, 70), 'respawn': 45, 'xp': 45, 'gold': 90, 'points': 3},
 ]
@@ -76,11 +76,13 @@ CAMP_LEASH = 16                # un Pokémon neutre ne s'éloigne pas plus de so
 
 # Petits Pokémon sauvages dispersés dans toute la jungle (en plus des camps).
 WILD = {
-    'count': 34,                               # nombre d'emplacements
+    'count': 48,                               # nombre d'emplacements (pair : placés en miroir Ouest / Est)
     'species': ['chenipan', 'rattata'],        # (Roucool et Mystherbe forment les vagues des voies)
     'hp_factor': .55,                          # les Rattata sauvages sont plus faibles que ceux des camps
     'xp': 36, 'gold': 40, 'points': 1, 'respawn': 40,
     'leash': 9,                                # distance de poursuite maximale
+    'per_arena': 4,                            # sauvages réservés autour de chaque arène (de quoi farmer sur chaque voie)
+    'arena_reach': 30,                         # ... à moins de 30 m de son centre (les IA y vont farmer)
     'wander': 3.5,                             # rayon de promenade autour de leur coin
 }
 
@@ -95,7 +97,7 @@ FINAL_BOSS = {'species': 'regigigas', 'spawn': 7 * 60, 'xp': 200, 'gold': 350, '
 # + PV fixes) puis le buisson repousse après 'respawn' secondes. Positions symétriques Ouest / Est,
 # toutes dans des couloirs praticables de la jungle.
 HEAL_PADS = {
-    'positions': [(-34, 68), (34, 68), (-41, 13), (41, 13), (-21, -59), (21, -59)],
+    'positions': [(-34, 68), (34, 68), (-41, 13), (41, 13), (-35, -45), (35, -45)],
     'heal_pct': .2,            # 20 % des PV max
     'heal_flat': 60,
     'radius': 1.8,

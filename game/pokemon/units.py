@@ -29,8 +29,7 @@ from game.world.fx import burst
 from game.world.geometry import destroy_tree, flat_circle
 
 STATUS_COLOR = {'burn': color.rgb(1, .5, .15), 'slow': color.rgb(.55, .9, 1), 'stun': color.rgb(1, .95, .3)}
-LOCAL_BAR = color.rgb(.3, .95, .35)          # barre de vie de son propre Pokémon
-ALLY_BAR = color.rgb(.35, .9, 1)             # barre de vie de l'autre joueur humain
+ALLY_BAR = color.rgb(.35, .9, 1)             # nom et repère de l'autre joueur humain
 LOCAL_BADGE = color.rgb(1, .62, .15)         # badge de niveau de son propre Pokémon
 ANIM_RANGE2 = 60.0 ** 2          # au-delà de cette distance de la caméra, pas d'animation ni d'effets
 EFFECT_KEYS = ('dmg', 'taken', 'cdr', 'regen', 'regen_pct', 'as', 'ms', 'lifesteal', 'recoil', 'thorns', 'sash',
@@ -87,9 +86,7 @@ class Unit:
             tc = C.TEAMS[team]['color']
             self.ring = flat_circle(self.creature, self.radius + .35, color.rgba(tc[0], tc[1], tc[2], .75), y=.05)
         h = 4.6 if self.kind == 'tower' else self.data['scale'] * 1.5 + .5
-        bar_col = C.TEAMS[team]['color'] if team else color.rgb(1, .75, .2)
-        if self.is_player:
-            bar_col = LOCAL_BAR if local else ALLY_BAR
+        bar_col = C.TEAMS[team]['color'] if team else color.rgb(1, .75, .2)    # joueurs compris : couleur d'équipe
         w = 3.2 if self.kind == 'neutral' and self._max_hp >= 1000 else 2.4 if self.kind == 'tower' else \
             1.1 if self.kind == 'minion' else 1.6
         badge = LOCAL_BADGE if local else bar_col
@@ -197,6 +194,7 @@ class Unit:
             self.recalc_stats()
         self.invuln = 0.0
         self.channel = 0.0
+        self.capturing = None         # arène en cours de capture (le Pokémon est immobilisé)
         self.guard_t, self.guard_red = 0.0, 0.0
         self.charge_t = 0.0
         self.charge_dir = Vec3(0, 0, 1)
@@ -390,6 +388,7 @@ class Unit:
     def die(self):
         self.alive = False
         self.hp = 0
+        self.capturing = None
         self.charge_t = 0
         self.rush_t = 0
         if self.transform_kind is not None:
@@ -540,17 +539,17 @@ class Unit:
 
     # ------------------------------------------------------------ actions
     def move(self, direction, dt, factor=1.0):
-        if direction.length() < .01:
+        if direction.length() < .01 or self.capturing is not None:
             return False
         p = self.position + direction * self.speed() * factor * dt
-        p = self.match.stadium.collide(p, self.radius)
+        p = self.match.stadium.collide(p, self.radius, self.team if self.kind == 'pokemon' else None)
         p.y = self.match.stadium.walk_y(p.x, p.z)
         self.position = p
         return True
 
     def can_act(self):
         return self.alive and self.status['stun'] <= 0 and self.charge_t <= 0 and self.channel <= 0 \
-            and self.rush_t <= 0
+            and self.rush_t <= 0 and self.capturing is None
 
     def in_attack_range(self, target, margin=0.0):
         return (flat(target.position - self.position)).length() < self.auto['range'] + target.radius + margin
@@ -821,7 +820,7 @@ class Unit:
         if (p.x - f.x) ** 2 + (p.z - f.z) ** 2 < ANIM_RANGE2 or self.local:   # loin de la caméra : pas d'animation
             if self.attack_anim <= 0 and self.charge_t <= 0 and self.creature.pivot.rotation_x < 0:
                 self.creature.pivot.rotation_x = 0
-            self.creature.animate(dt, moving, self.attack_anim > 0 or self.channel > 0)
+            self.creature.animate(dt, moving, self.attack_anim > 0 or self.channel > 0 or self.capturing is not None)
         if self._last is not None and dt > 0:        # vitesse réelle (utilisée pour viser)
             self.vel = Vec3((p.x - self._last.x) / dt, 0, (p.z - self._last.z) / dt)
         self._last = Vec3(p)
@@ -1135,7 +1134,27 @@ class PlayerBrain:
         else:
             m.net.send_use(C.TRANSFORM_KEY, None, u.facing(), None)
 
+    def toggle_capture(self):
+        """Touche de capture : commence (dans une arène à prendre) ou arrête la capture."""
+        u, m = self.u, self.m
+        a = None if u.capturing is not None else m.capture_spot(u)
+        if u.capturing is None and a is None:
+            m.game.banner.show("Entrez dans le cercle d'une arène à prendre pour la capturer", 1.5,
+                               text_color=color.rgb(.8, .85, 1))
+            return
+        self.order = None
+        if self.aiming is not None:
+            self.release(cast=False)
+        m.set_capture(u, a)
+        if not m.authority:
+            m.net.send_use('capture:on' if a is not None else 'capture:off', None, u.facing(), None)
+
     def input(self, key):
+        if key == C.CAPTURE_KEY:
+            self.toggle_capture()
+            return
+        if self.u.capturing is not None:
+            return                                   # en pleine capture : on ne peut rien faire d'autre
         if key in ('space', 'shift', 'left shift', 'right shift'):
             self.dash()
             return
@@ -1164,6 +1183,10 @@ class PlayerBrain:
     def update(self, dt):
         u, m = self.u, self.m
         self.dash_cd -= dt
+        if u.capturing is not None:
+            if m.capture_spot(u) is u.capturing:
+                return False                          # immobile tant que dure la capture
+            m.set_capture(u, None)                    # arène prise (ou perdue) : on est libre
         self.target = m.find_target(u, C.TARGET_RANGE)
         if self.aiming is not None and self.indicator is not None:
             mv = u.get_move(self.aiming)
@@ -1266,6 +1289,9 @@ class RemotePlayerBrain(PlayerBrain):
                 if self.u.can_transform():
                     self.u.start_transform()
                 return
+            if key.startswith('capture:'):
+                self.m.set_capture(self.u, self.m.capture_spot(self.u) if key == 'capture:on' else None)
+                return
             mv = next((mv for mv in self.moves if mv['key'] == key), None)
             if mv is not None:
                 if self.aim is not None:
@@ -1344,7 +1370,7 @@ class BotBrain:
                 self.target = None
         self.goal = m.choose_goal(u, self.goal)
         if self.target is None and self.goal and self.goal[0].startswith('arena') and random.random() < .5:
-            wild = m.nearest_wild(u.position, 13)
+            wild = m.nearest_wild(u.position, C.WILD['arena_reach'])
             if wild is not None:
                 self.target = wild
         if self.target is None:
@@ -1370,6 +1396,14 @@ class BotBrain:
         if t is not None and (not t.alive or (t.team is None and self.mode == 'retreat')
                               or t in m.hidden[u.team]):       # perdu de vue dans les hautes herbes
             self.target = t = None
+        # dans une arène à prendre, sans adversaire à combattre : on capture (la tour ne tire plus)
+        spot = m.capture_spot(u) if self.mode != 'retreat' and (t is None or t.kind == 'tower') else None
+        if spot is not None and self.goal is not None and self.goal[0].startswith('arena'):
+            if u.capturing is not spot:
+                m.set_capture(u, spot)
+            return False
+        if u.capturing is not None:
+            m.set_capture(u, None)
         if self.mode == 'retreat':
             self.use_moves(None, 0)                            # soins, même en repli
         if t is not None:
@@ -1465,7 +1499,7 @@ class TowerBrain:
         best, bs = None, 1e9
         R = C.TOWER['range']
         for e in m.units:
-            if e.alive and e.team and e.team != u.team and e.kind in ('pokemon', 'minion'):
+            if e.alive and e.team and e.team != u.team and e.kind in ('pokemon', 'minion') and e.capturing is None:
                 d = (flat(e.position - u.position)).length()
                 if d < R + e.radius:
                     if e.kind == 'pokemon' and m.time - e.aggro_t < 2.0:

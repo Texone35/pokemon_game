@@ -19,7 +19,7 @@ import random
 import numpy as np
 from ursina import Vec3, color
 
-from game.world.geometry import MeshBuilder
+from game.world.geometry import MeshBuilder, on_main
 
 
 def ring_mesh(parent, col, emissive=.8):
@@ -789,6 +789,7 @@ class Arcs:
         self.parent, self.rng = parent, rng
         self.links = []
 
+    @on_main
     def _bolt(self, a, b, width, jitter):
         node = _additive(_bolt_mesh(a, b, width, jitter, .18, self.rng).static(self.parent, emissive=1.0))
         node.set_color_scale(.95, .8, 1, 1)
@@ -986,3 +987,147 @@ class ArenaWeather:
             x, z = self.centre.x + math.sin(a) * ar, self.centre.z + math.cos(a) * ar
             smoke(P, (x, self._y(x, z) + .3, z), (rnd(.3), 1.2, rnd(.3)), s=1.6, life=3, alpha=.25)
             P.emit((x, self._y(x, z) + .2, z), (1, .5, .1), size=1.6, life=1, alpha=.4)
+
+    # ------------------------------------------------------------ météos des thèmes ajoutés
+    def _motes(self, P, dt, key, rate, col, col2=None, size=(.2, .35), h=(.5, 5), vel=.3, rise=0.0, life=(3, 5),
+               tex='glow', blend='add', alpha=.85, extra=4):
+        """Particules qui flottent dans le quartier (lucioles, paillettes, spores...)."""
+        rng = self.rng
+        for _ in range(self._rate(key, rate, dt)):
+            x, z = self._spot(extra)
+            P.emit((x, self._y(x, z) + rng.uniform(*h), z), col, col2=col2, size=rng.uniform(*size),
+                   life=rng.uniform(*life), vel=(rnd(vel), rise + rnd(vel * .6), rnd(vel)), tex=tex, blend=blend,
+                   alpha=alpha, fade=.6, spin=rnd(2))
+
+    def _veil(self, P, dt, key, rate, col, alpha, size=(18, 24)):
+        """Voile au sol (ombre de nuage, lueur) : l'ambiance du quartier change."""
+        for _ in range(self._rate(key, rate, dt)):
+            x, z = self._spot(-6)
+            P.emit((x, self._y(x, z) + .25, z), col, size=self.rng.uniform(*size), life=5, grow=1.1, tex='smoke',
+                   blend='alpha', mode='flat', alpha=alpha, fade=1.0)
+
+    def _fog(self, P, dt, key, rate, col, alpha, h=(.4, 1.5)):
+        rng = self.rng
+        for _ in range(self._rate(key, rate, dt)):
+            x, z = self._spot()
+            P.emit((x, self._y(x, z) + rng.uniform(*h), z), col, size=rng.uniform(6, 9), life=4.5,
+                   vel=(self.wind.x * .4, 0, self.wind.z * .4), grow=1.3, tex='smoke', blend='alpha', alpha=alpha)
+
+    def _clair(self, P, dt):                         # ciel clair : brise légère, aigrettes de pissenlit
+        self._motes(P, dt, 'seed', 10, (1, 1, .95), size=(.15, .25), vel=.5, h=(1, 5), alpha=.8)
+        for _ in range(self._rate('ray', .6, dt)):
+            x, z = self._spot(-2)
+            P.emit((x, self._y(x, z) + 5, z), (1, .97, .8), size=1.6, life=5, tex='streak', mode='stretch',
+                   stretch=0, alpha=.08, grow=1.2)
+
+    def _grele(self, P, dt):                         # grêle : neige oblique, grêlons qui rebondissent, froid
+        rng, w = self.rng, self.wind
+        for _ in range(self._rate('flake', 120, dt)):
+            x, z = self._spot(6)
+            h = rng.uniform(6, 11)
+            P.emit((x, self._y(x, z) + h, z), (.95, .97, 1), size=rng.uniform(.12, .22), life=h / 5,
+                   vel=(w.x * 2 + rnd(.6), -5, w.z * 2 + rnd(.6)), tex='glow', blend='alpha', alpha=.9, spin=rnd(3))
+        for _ in range(self._rate('hail', 30, dt)):
+            x, z = self._spot(4)
+            P.emit((x, self._y(x, z) + .3, z), (.85, .92, 1), size=.18, life=.4, vel=(rnd(1), ru(2, 3.5), rnd(1)),
+                   gravity=14, tex='shard', blend='alpha', alpha=.9)
+        self._veil(P, dt, 'cloud', .9, (.55, .62, .75), .2)
+        self._fog(P, dt, 'mist', 2, (.9, .94, 1), .22)
+
+    def _ferveur(self, P, dt):                       # ferveur du dojo : feuilles d'érable rouges, énergie
+        rng = self.rng
+        for _ in range(self._rate('leaf', 12, dt)):
+            x, z = self._spot(5)
+            P.emit((x, self._y(x, z) + rng.uniform(3, 7), z), rng.choice(((.9, .25, .15), (1, .5, .2), (.85, .4, .1))),
+                   size=rng.uniform(.35, .5), life=6, vel=(self.wind.x + rnd(.3), -1.0, self.wind.z + rnd(.3)),
+                   drag=.1, tex='leaf', blend='alpha', spin=rnd(4), alpha=1, fade=.4)
+        self._motes(P, dt, 'ki', 8, (1, .55, .3), (1, .85, .5), size=(.15, .3), rise=1.2, h=(.2, 1.5), life=(1, 2))
+
+    def _toxique(self, P, dt):                       # brume toxique : nappes violettes, bulles qui éclatent
+        self._fog(P, dt, 'mist', 5, (.55, .35, .6), .26)
+        self._veil(P, dt, 'glow', .8, (.35, .6, .2), .16)
+        self._motes(P, dt, 'bubble', 18, (.7, 1, .4), (.8, .5, 1), size=(.15, .35), rise=.8, h=(.1, 1), life=(1.5, 3),
+                    tex='ring', blend='alpha', alpha=.7)
+
+    def _seisme(self, P, dt):                        # terrain sismique : poussière qui jaillit du sol, cailloux
+        rng = self.rng
+        for _ in range(self._rate('burst', 2.5, dt)):
+            x, z = self._spot()
+            for k in range(6):
+                a = k * math.tau / 6
+                P.emit((x, self._y(x, z) + .2, z), (.75, .6, .42), size=1.6, life=1.4,
+                       vel=(math.sin(a) * 2.5, ru(.5, 1.2), math.cos(a) * 2.5), grow=1.8, tex='smoke', blend='alpha',
+                       alpha=.35)
+            for _ in range(4):
+                P.emit((x, self._y(x, z) + .2, z), (.55, .45, .35), size=.22, life=.8, vel=(rnd(2), ru(3, 5), rnd(2)),
+                       gravity=14, tex='shard', blend='alpha', alpha=1)
+        self._veil(P, dt, 'dust', .6, (.45, .32, .2), .16)
+
+    def _vent(self, P, dt):                          # vent arrière : rafales en traits, plumes et feuilles
+        rng, w = self.rng, self.wind
+        for _ in range(self._rate('gust', 26, dt)):
+            x, z = self._spot(6)
+            sp = rng.uniform(12, 18)
+            P.emit((x, self._y(x, z) + rng.uniform(.5, 4), z), (1, 1, 1), size=.2, life=.6,
+                   vel=(w.x * sp, rnd(.4), w.z * sp), tex='streak', blend='alpha', mode='stretch', stretch=.08,
+                   alpha=.35)
+        for _ in range(self._rate('feather', 6, dt)):
+            x, z = self._spot(5)
+            P.emit((x, self._y(x, z) + rng.uniform(2, 6), z), (.97, .97, 1), size=rng.uniform(.35, .5), life=5,
+                   vel=(w.x * 3 + rnd(.4), -.4, w.z * 3 + rnd(.4)), drag=.1, tex='leaf', blend='alpha', spin=rnd(5),
+                   alpha=1, fade=.4)
+
+    def _psychique(self, P, dt):                     # champ psychique : motes roses qui montent, anneaux
+        self._motes(P, dt, 'mote', 22, (1, .55, .95), (.7, .5, 1), size=(.2, .35), rise=.6, h=(.2, 3))
+        self._veil(P, dt, 'glow', .6, (.6, .3, .7), .14)
+        for _ in range(self._rate('ring', .8, dt)):
+            x, z = self._spot()
+            P.emit((x, self._y(x, z) + .2, z), (1, .6, 1), size=1.0, life=1.6, grow=6, tex='ring', mode='flat',
+                   alpha=.5, rot=0)
+
+    def _essaim(self, P, dt):                        # essaim : lucioles et insectes qui tournoient
+        self._motes(P, dt, 'fly', 30, (.85, 1, .35), (1, .9, .3), size=(.08, .16), vel=1.2, h=(.5, 3.5),
+                    life=(2, 4), alpha=.95)
+        self._veil(P, dt, 'shade', .6, (.2, .3, .08), .14)
+
+    def _brume(self, P, dt):                         # brume spectrale : brouillard épais, feux follets
+        self._fog(P, dt, 'mist', 7, (.62, .6, .72), .3, h=(.3, 2.2))
+        self._veil(P, dt, 'dark', .9, (.08, .06, .14), .24)
+        self._motes(P, dt, 'wisp', 5, (.6, .5, 1), (.4, .9, 1), size=(.3, .45), vel=.6, h=(.5, 2.5), life=(3, 5))
+
+    def _draconique(self, P, dt):                    # souffle draconique : rubans d'énergie bleus et violets
+        rng = self.rng
+        for _ in range(self._rate('ribbon', 10, dt)):
+            x, z = self._spot(4)
+            P.emit((x, self._y(x, z) + rng.uniform(.5, 4), z), rng.choice(((.45, .5, 1), (.65, .4, 1))),
+                   col2=(.3, .8, 1), size=.3, life=1.6, vel=(rnd(3), ru(.5, 1.5), rnd(3)), tex='streak',
+                   mode='stretch', stretch=.12, alpha=.7, drag=.5)
+        self._veil(P, dt, 'glow', .6, (.25, .2, .55), .16)
+        self._motes(P, dt, 'scale', 8, (.6, .7, 1), size=(.12, .2), tex='shard', rise=-.3, h=(2, 6))
+
+    def _nuit(self, P, dt):                          # nuit noire : ombre profonde, yeux rouges dans le noir
+        self._veil(P, dt, 'night', 1.4, (.02, .02, .05), .38)
+        self._fog(P, dt, 'mist', 3, (.12, .1, .16), .3)
+        for _ in range(self._rate('eyes', 1.2, dt)):
+            x, z = self._spot(4)
+            y = self._y(x, z) + self.rng.uniform(.8, 2)
+            for sd in (-.18, .18):
+                P.emit((x + sd, y, z), (1, .15, .1), size=.18, life=1.6, alpha=.9, fade=.3)
+
+    def _magnetique(self, P, dt):                    # champ magnétique : étincelles et arcs bleutés
+        self._motes(P, dt, 'spark', 16, (.5, .9, 1), (1, 1, 1), size=(.1, .18), vel=1.5, h=(.2, 2.5), life=(.4, .9),
+                    tex='star', alpha=.9)
+        for _ in range(self._rate('field', .7, dt)):
+            x, z = self._spot()
+            P.emit((x, self._y(x, z) + .15, z), (.4, .85, 1), size=1.2, life=1.4, grow=5, tex='ring', mode='flat',
+                   alpha=.45, rot=0)
+
+    def _feerique(self, P, dt):                      # champ brumeux : paillettes, brume rose, pétales
+        self._motes(P, dt, 'glitter', 26, (1, .8, .95), (.8, .9, 1), size=(.12, .25), tex='star', h=(.3, 4),
+                    life=(2, 3.5))
+        self._fog(P, dt, 'mist', 3, (1, .85, .95), .2)
+        for _ in range(self._rate('petal', 6, dt)):
+            x, z = self._spot(5)
+            P.emit((x, self._y(x, z) + self.rng.uniform(3, 6), z), (1, .75, .88), size=.4, life=6,
+                   vel=(self.wind.x * .6 + rnd(.3), -1, self.wind.z * .6 + rnd(.3)), drag=.1, tex='leaf',
+                   blend='alpha', spin=rnd(4), alpha=1, fade=.4)

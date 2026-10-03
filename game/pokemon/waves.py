@@ -59,8 +59,8 @@ class Path:
 
 
 class Waves:
-    def __init__(self, match):
-        from game.pokemon.units import Unit
+    def __init__(self, match, build=True):
+        """build=False : la réserve de sbires se crée ensuite avec build() (générateur, une étape par sbire)."""
         self.m = match
         arenas = {a['key']: a for a in match.arenas}
         paths = _ring_paths()
@@ -69,6 +69,13 @@ class Waves:
             p = Path(paths[(a, b)])
             self.lanes.append({'ends': (arenas[a], arenas[b]), 'paths': (p, p.reversed()), 'timers': [None, None]})
         self.pool = {t: [] for t in TEAM_KEYS}
+        if build:
+            for _ in self.build():
+                pass
+
+    def build(self):
+        from game.pokemon.units import Unit
+        match = self.m
         comp = C.WAVES['composition']
         for team in TEAM_KEYS:
             for i in range(C.WAVES['pool']):
@@ -77,6 +84,7 @@ class Waves:
                 match._add_unit(u)
                 match._despawn(u)
                 self.pool[team].append(u)
+                yield
 
     def reset(self):
         for lane in self.lanes:

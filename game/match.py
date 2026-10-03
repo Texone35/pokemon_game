@@ -2,8 +2,8 @@
 
 Deux équipes de 5 s'affrontent pour le contrôle de 5 arènes ouvertes. L'équipe
 rouge compte un ou deux joueurs humains (le Pokémon choisi dans le salon), le
-reste est joué par l'ordinateur. Une arène se capture en restant dans son cercle
-sans adversaire (plus on est nombreux, plus c'est rapide) ; si les deux équipes
+reste est joué par l'ordinateur. Une arène se capture dans son cercle, touche de
+capture enfoncée (immobile, mais la tour ne tire plus), sans adversaire (plus on est nombreux, plus c'est rapide) ; si les deux équipes
 sont présentes, elle est contestée. Chaque arène contrôlée rapporte des points
 Dominion chaque seconde et un bonus à toute l'équipe. Les K.O., les camps de la
 jungle et les boss du Boss Pit rapportent aussi des points.
@@ -31,9 +31,17 @@ from game.interface.widgets import Feed, MoveSlot, floating_text, hp_color
 from game.pokemon.units import ALLY_BAR, BotBrain, NeutralBrain, PlayerBrain, RemotePlayerBrain, TowerBrain, Unit
 
 TEAM_KEYS = ('rouge', 'bleu')
-# couleurs de la mini-carte par biome (ordre de biomes.KEYS) : sol praticable et massifs
-MAP_GROUND = [(76, 140, 70), (150, 128, 88), (70, 140, 58), (92, 146, 76), (86, 150, 112), (84, 70, 62)]
-MAP_MASSIF = [(22, 52, 24), (112, 84, 56), (18, 66, 22), (30, 64, 30), (24, 78, 66), (46, 32, 30)]
+# couleurs de la mini-carte par type de biome : sol praticable et massifs
+MAP_GROUND = {'jungle': (76, 140, 70), 'roche': (150, 128, 88), 'plante': (70, 140, 58), 'electrik': (92, 146, 76),
+              'eau': (86, 150, 112), 'feu': (84, 70, 62), 'normal': (110, 160, 80), 'glace': (205, 220, 232),
+              'combat': (150, 140, 90), 'poison': (100, 90, 90), 'sol': (180, 140, 90), 'vol': (150, 200, 140),
+              'psy': (170, 130, 190), 'insecte': (110, 140, 60), 'spectre': (80, 80, 95), 'dragon': (110, 110, 140),
+              'tenebres': (55, 55, 70), 'acier': (150, 155, 165), 'fee': (190, 220, 180)}
+MAP_MASSIF = {'jungle': (22, 52, 24), 'roche': (112, 84, 56), 'plante': (18, 66, 22), 'electrik': (30, 64, 30),
+              'eau': (24, 78, 66), 'feu': (46, 32, 30), 'normal': (40, 72, 32), 'glace': (120, 150, 170),
+              'combat': (70, 60, 40), 'poison': (60, 40, 70), 'sol': (120, 84, 50), 'vol': (80, 120, 90),
+              'psy': (90, 60, 110), 'insecte': (40, 60, 20), 'spectre': (35, 30, 50), 'dragon': (55, 45, 85),
+              'tenebres': (20, 18, 30), 'acier': (80, 85, 95), 'fee': (110, 150, 120)}
 NEUTRAL_RING = color.rgb(.85, .85, .85)
 STAT_KEYS = ('ko', 'deaths', 'assists', 'dmg', 'taken', 'heal', 'caps', 'points')
 RESULTS_DELAY = 2.5             # secondes entre la fin de la partie et la page des résultats
@@ -44,9 +52,14 @@ def v3(p):
 
 
 class Match(Entity):
-    def __init__(self, game, setup=None):
+    def __init__(self, game, setup=None, defer=False):
         """setup : {'humans': [espèce de J1, espèce de J2...], 'local': n° du joueur de ce PC,
-        'role': 'solo' | 'host' | 'client', 'host': net.Host, 'link': net.Link}."""
+        'role': 'solo' | 'host' | 'client', 'host': net.Host, 'link': net.Link, 'seed': graine du tirage,
+        'preload': world.preload.MapPreload (carte déjà construite ou en cours, depuis le salon)}.
+
+        defer=True : la partie se construit par petites étapes avec step() (écran de chargement
+        animé) ; elle reste cachée et inactive jusqu'à ce que l'appelant l'active (enabled) une fois
+        self.ready vrai."""
         super().__init__()
         setup = setup or {'humans': ['pikachu'], 'local': 0, 'role': 'solo'}
         self.game = game
@@ -54,8 +67,51 @@ class Match(Entity):
         self.authority = self.role != 'client'   # l'hôte (ou le solo) décide de tout
         self.ai_level = setup.get('ai', 'facile')   # 'facile' (BotBrain) ou 'expert' (ai.ExpertBrain)
         self.net = None
-        self.root = Entity(parent=self)
-        self.stadium = Stadium(self.root)
+        self.ready, self.load_progress, self.load_label = False, 0.0, 'Préparation'
+        self.preload = None
+        self._warmup = 4                 # (images de préparation des ombres, après la construction)
+        self.enabled = False
+        self._build_gen = self._construct(setup)
+        if not defer:
+            while not self.step(1.0):
+                pass
+            self.enabled = True
+
+    def step(self, budget=.02):
+        """Avance la construction pendant `budget` secondes environ ; vrai quand la partie est prête."""
+        import time
+        end = time.perf_counter() + budget
+        while not self.ready:
+            if self.preload is not None:            # carte encore en construction : on l'attend en dormant
+                self.preload.pump(max(.002, end - time.perf_counter()), wait=True)
+            try:
+                next(self._build_gen)
+                self._steps = getattr(self, '_steps', 0) + 1
+                if self._steps % 12 == 0:              # Ursina saute ensuite les entités passives déjà créées
+                    self._ignore_passive_entities()
+            except StopIteration:
+                self.ready = True             # (l'appelant active la partie : self.enabled = True)
+            if time.perf_counter() > end:
+                break
+        return self.ready
+
+    def _construct(self, setup):
+        """Construction de la partie (générateur : une étape par `yield`)."""
+        from game.world import geometry
+        from game.world.preload import MapPreload
+        self.preload = setup.get('preload') or MapPreload(setup.get('seed') or 0)
+        geometry.BREATHE[1] = 0.0                        # écran de chargement : la carte finit à pleine vitesse
+        C.apply_map(self.preload.types)                  # types des arènes tirés pour cette partie
+        while not self.preload.done:                     # carte : construite en arrière-plan
+            self.load_progress, self.load_label = .6 * self.preload.progress, self.preload.label
+            yield
+        self.stadium = self.preload.take()
+        self.root = self.preload.root
+        self.root.parent = self
+        self.root.enabled = True
+        self.preload = None
+        self.load_progress, self.load_label = .6, 'Pokémon'
+        yield
         from game.world import fx
         fx.PARTICLES = self.particles = fx.Particles(self.root)
         self.projectiles, self.hazards = [], []
@@ -67,8 +123,9 @@ class Match(Entity):
         self.shake_amount = 0.0
         self._bonus = {'rouge': {}, 'bleu': {}, None: {}}
         self.hidden = {'rouge': set(), 'bleu': set(), None: set()}   # Pokémon cachés dans l'herbe, par équipe qui regarde
-
+        yield
         self._build_arenas()
+        yield
         self.units = []
         self.team_units = {'rouge': [], 'bleu': []}
         self.humans = []
@@ -89,16 +146,24 @@ class Match(Entity):
                 self.team_units[team].append(u)
                 if human is not None:
                     self.humans.append(u)
+                self.load_progress += .01
+                yield
         self.remote = next((h for h in self.humans if not h.local), None)
         self.auras = {t: [u for u in self.team_units[t] if u.trait in ('Plus', 'Écran Neige')] for t in TEAM_KEYS}
         self._reset_stats()
         self.results = None             # page de fin de partie
         self._end_t = 0.0
-        self._build_camps()
+        self.load_label = 'Pokémon sauvages'
+        yield from self._build_camps()
+        self.load_label = 'Boss et tours'
         self._build_bosses()
+        yield
         self._build_towers()
+        yield
         from game.pokemon.waves import Waves
-        self.waves = Waves(self)
+        self.load_label = 'Sbires'
+        self.waves = Waves(self, build=False)
+        yield from self.waves.build()
         self._build_pads()
         if self.role == 'host':
             from game.network.netsync import HostSync
@@ -118,9 +183,12 @@ class Match(Entity):
         self.cam_view = Vec3(self.cam_yaw, self.cam_pitch, self.cam_dist)
         self.cam_map_target = Vec3(0, 0, 0)
         self.cam_target = Vec3(self.player.position)
-        self._build_hud()
+        self.load_label, self.load_progress = 'Interface', .96
+        yield
+        yield from self._build_hud()
         self._place_camera(1)
-        self.game.banner.show('Dominez les arènes ! Capturez-les en restant dans leur cercle.', 4)
+        self.game.banner.show(f'Dominez les arènes ! Dans leur cercle, appuyez sur {key_label(C.CAPTURE_KEY)} '
+                              'pour les capturer.', 4)
 
     def bot_brain(self, u):
         """Cerveau d'un Pokémon contrôlé par l'ordinateur, selon le niveau choisi dans le salon."""
@@ -169,12 +237,59 @@ class Match(Entity):
                          scale=26, origin=(0, 0), color=t['light'])
             weather = ArenaWeather(self.root, cfg['pos'], C.WEATHER_RADIUS, cfg['weather'], t['color'], base=y0,
                                    ground=self.stadium.walk_y, arena_radius=R)
-            self.arenas.append({'key': cfg['key'], 'name': cfg['name'], 'type': cfg['type'], 'pos': p, 'y0': y0,
-                                'nav': 'arena:' + cfg['key'], 'control': 0.0, 'owner': None, 'contested': False,
+            self.arenas.append({'key': cfg['key'], 'name': cfg['name'], 'place': cfg.get('place', ''),
+                                'type': cfg['type'], 'pos': p, 'y0': y0, 'nav':'arena:' + cfg['key'], 'control': 0.0, 'owner': None, 'contested': False,
                                 'count': {'rouge': 0, 'bleu': 0}, 'ring': ring, 'crystal': crystal,
                                 'emblem': emblem, 'label': label, 'weather': weather,
                                 'wx_key': cfg['weather'], 'wx': C.WEATHERS[cfg['weather']],
-                                'towers': {}, 'tower_t': 0.0, 'wx_tick': 0.0})
+                                'towers': {}, 'tower_t': 0.0, 'wx_tick': 0.0,
+                                'district': self._district_border(p)})
+
+    def _district_border(self, centre, width=1.4, n=160):
+        """Liseré posé sur le relief, au bord du quartier d'une arène (zone de sa météo). Il prend la
+        couleur de l'équipe qui tient l'arène et disparaît quand elle est neutre."""
+        import numpy as np
+        st = self.stadium
+        R = C.WEATHER_RADIUS
+        verts, tris = [], []
+        for i in range(n):
+            a = math.tau * i / n
+            sx, sz = math.sin(a), math.cos(a)
+            for r in (R - width / 2, R + width / 2):
+                x, z = centre.x + sx * r, centre.z + sz * r
+                verts.append((x, max(st.ground_y(x, z), st.walk_y(x, z)) + .18, z))
+        for i in range(n):
+            a0, a1, b0, b1 = 2 * i, 2 * i + 1, 2 * ((i + 1) % n), 2 * ((i + 1) % n) + 1
+            tris += [a0, b0, b1, a0, b1, a1, a0, b1, b0, a0, a1, b1]      # les deux sens
+        mb = MeshBuilder()
+        mb.add_raw(np.array(verts), np.array(tris), np.array([(0, 1, 0)] * len(verts)),
+                   np.array([(1, 1, 1, 1)] * len(verts)))
+        e = mb.entity(parent=self.root, emissive=1.0, transparent=True, color=color.rgba(1, 1, 1, 0))
+        e.enabled = False
+        # voile léger sur tout le sol du quartier (anneaux concentriques posés sur le relief)
+        verts, tris, rings = [], [], 14
+        verts.append((centre.x, st.ground_y(centre.x, centre.z) + .15, centre.z))
+        for k in range(1, rings + 1):
+            r = R * k / rings
+            for i in range(n // 2):
+                a = math.tau * i / (n // 2)
+                x, z = centre.x + math.sin(a) * r, centre.z + math.cos(a) * r
+                verts.append((x, max(st.ground_y(x, z), st.walk_y(x, z)) + .15, z))
+        m = n // 2
+        for i in range(m):
+            j = (i + 1) % m
+            tris += [0, 1 + i, 1 + j, 0, 1 + j, 1 + i]
+        for k in range(1, rings):
+            o0, o1 = 1 + (k - 1) * m, 1 + k * m
+            for i in range(m):
+                j = (i + 1) % m
+                tris += [o0 + i, o1 + i, o1 + j, o0 + i, o1 + j, o0 + j, o0 + i, o1 + j, o1 + i, o0 + i, o0 + j, o1 + j]
+        fb = MeshBuilder()
+        fb.add_raw(np.array(verts), np.array(tris), np.array([(0, 1, 0)] * len(verts)),
+                   np.array([(1, 1, 1, 1)] * len(verts)))
+        e.fill = fb.entity(parent=e, emissive=1.0, transparent=True, color=color.rgba(1, 1, 1, .1))
+        e.fill.set_depth_write(False)
+        return e
 
     def _build_camps(self):
         self.camps = []
@@ -190,40 +305,70 @@ class Match(Entity):
                 u.brain = NeutralBrain(u, self)
                 camp['units'].append(u)
                 self._add_unit(u)
+                self.load_progress += .003
+                yield
             self.camps.append(camp)
-        self._build_wild()
+        yield from self._build_wild()
 
     def _wild_spots(self, count):
-        """Emplacements des petits sauvages : dans la jungle, accessibles, bien espacés."""
-        rng = random.Random(21)
+        """Emplacements des petits sauvages : dans la jungle, accessibles, en miroir Ouest / Est (aucune
+        équipe n'a plus à manger que l'autre) et répartis le plus uniformément possible : chaque nouvel
+        emplacement est le point le plus éloigné de tout ce qui est déjà placé (camps, arènes, sauvages).
+        D'abord WILD['per_arena'] autour de chaque arène (chaque voie a de quoi farmer), puis le reste
+        dans toute la jungle."""
+        import numpy as np
         st = self.stadium
         field = st.field('base:rouge', *C.TEAMS['rouge']['base'], 'rouge')
-        taken = [c['pos'] for c in self.camps] + [a['pos'] for a in self.arenas]
+        R = C.FIELD_RADIUS - 8
+        xs = np.arange(-R, -4, 3.0)                      # moitié Ouest ; le miroir donne la moitié Est
+        X, Z = np.meshgrid(xs, np.arange(-R, R, 3.0), indexing='ij')
+        X, Z = X.ravel(), Z.ravel()
+        ok = (np.hypot(X, Z) < R) & (np.hypot(X, Z) > C.PIT_RADIUS + 10)
+        for tx, tz in (t['base'] for t in C.TEAMS.values()):
+            ok &= np.hypot(X - tx, Z - tz) > C.BASE_RADIUS + 12
+        cand = []
+        for x, z in zip(X[ok].tolist(), Z[ok].tolist()):
+            if st.blocked(x, z, 1.3) or st.blocked(-x, z, 1.3):
+                continue
+            ia, ja = st.cell_of(x, z)
+            ib, jb = st.cell_of(-x, z)
+            if st.walk[ia, ja] and st.walk[ib, jb] and math.isfinite(field[ia, ja]) and math.isfinite(field[ib, jb]):
+                cand.append((x, z))
+        P = np.array(cand)
+        # distance de chaque candidat à ce qui est déjà occupé (moins la marge propre à chaque chose)
+        gap = np.full(len(P), 1e9)
+        for a in self.arenas:
+            gap = np.minimum(gap, np.hypot(P[:, 0] - a['pos'].x, P[:, 1] - a['pos'].z) - (C.ARENA_RADIUS + 6))
+        for c in self.camps:
+            gap = np.minimum(gap, np.hypot(P[:, 0] - c['pos'].x, P[:, 1] - c['pos'].z) - 9)
         spots = []
-        for _ in range(4000):
-            if len(spots) >= count:
-                break
-            a, r = rng.uniform(0, math.tau), math.sqrt(rng.random()) * (C.FIELD_RADIUS - 8)
-            x, z = math.sin(a) * r, math.cos(a) * r
-            if math.hypot(x, z) < C.PIT_RADIUS + 10 or st.blocked(x, z, 1.3):
-                continue
-            if any(math.hypot(x - tx, z - tz) < C.BASE_RADIUS + 12 for tx, tz in (t['base'] for t in C.TEAMS.values())):
-                continue
-            p = Vec3(x, 0, z)
-            if any((p - q).length() < (C.ARENA_RADIUS + 6 if q in [ar['pos'] for ar in self.arenas] else 9)
-                   for q in taken):
-                continue
-            i, j = st.cell_of(x, z)
-            if not st.walk[i, j] or not math.isfinite(field[i, j]):
-                continue
-            spots.append(p)
-            taken.append(p)
+
+        def pick(n, zone=None):
+            nonlocal gap
+            for _ in range(n):
+                g = gap if zone is None else np.where(zone, gap, -1e9)
+                k = int(np.argmax(g))
+                if g[k] < 4 or len(spots) >= count:      # plus de place : on s'arrête là
+                    return
+                x, z = P[k]
+                spots.extend([Vec3(x, 0, z), Vec3(-x, 0, z)])
+                for px in (x, -x):                       # (le miroir compte aussi, près de l'axe central)
+                    gap = np.minimum(gap, np.hypot(P[:, 0] - px, P[:, 1] - z))
+
+        reach = C.WILD['arena_reach']
+        for a in self.arenas:                            # arènes de l'Ouest et Nord (l'Est est le miroir)
+            if a['pos'].x <= 0:
+                near = np.hypot(P[:, 0] - a['pos'].x, P[:, 1] - a['pos'].z) < reach
+                pick(C.WILD['per_arena'] // (2 if a['pos'].x == 0 else 1), near)
+        pick(count)
         return spots
 
     def _build_wild(self):
         cfg_w = C.WILD
         rng = random.Random(5)
-        for i, p in enumerate(self._wild_spots(cfg_w['count'])):
+        spots = self._wild_spots(cfg_w['count'])
+        yield
+        for i, p in enumerate(spots):
             species = rng.choice(cfg_w['species'])
             cfg = {'species': species, 'respawn': cfg_w['respawn'], 'xp': cfg_w['xp'], 'points': cfg_w['points']}
             camp = {'cfg': cfg, 'key': f'wild:{i}', 'pos': p, 'units': [], 'alive': True, 'respawn_t': 0.0,
@@ -238,6 +383,8 @@ class Match(Entity):
             camp['units'].append(u)
             self._add_unit(u)
             self.camps.append(camp)
+            self.load_progress += .002
+            yield
 
     def nearest_wild(self, pos, rng):
         best, bd = None, rng
@@ -300,6 +447,28 @@ class Match(Entity):
 
     def tower_up(self, a):
         return a['owner'] is not None and a['towers'][a['owner']].alive
+
+    # ---------------------------------------------------------------- capture (touche C.CAPTURE_KEY)
+    def capture_spot(self, u):
+        """Arène dans le cercle de laquelle se tient u et que son équipe ne tient pas encore
+        entièrement (sinon None) : c'est là qu'il peut lancer une capture."""
+        if not u.alive or u.kind != 'pokemon' or not u.team:
+            return None
+        full = 1.0 if u.team == 'rouge' else -1.0
+        for a in self.arenas:
+            if C.in_arena(u.position.x - a['pos'].x, u.position.z - a['pos'].z):
+                return None if a['owner'] == u.team and a['control'] == full else a
+        return None
+
+    def set_capture(self, u, a):
+        """Commence (a = arène) ou arrête (a = None) la capture de u : immobile, sans attaquer, mais
+        la tour ne le vise plus."""
+        if u.capturing is a:
+            return
+        u.capturing = a
+        if u is self.player and a is not None:
+            self.game.banner.show(f"Capture de l'{a['name']}... ({key_label(C.CAPTURE_KEY)} : arrêter)", 2,
+                                  text_color=C.TEAMS[u.team]['light'])
 
     def enemy_tower_near(self, u, r):
         """Tour adverse à abattre : à portée, et aucun Pokémon adverse ne la défend à côté."""
@@ -1231,25 +1400,31 @@ class Match(Entity):
         for a in self.arenas:
             cnt = {'rouge': 0, 'bleu': 0}
             mins = {'rouge': 0, 'bleu': 0}
+            caps = {'rouge': 0, 'bleu': 0}
             for u in self.units:
                 if u.alive and u.team and u.kind in ('pokemon', 'minion') \
                         and C.in_arena(u.position.x - a['pos'].x, u.position.z - a['pos'].z):
                     (cnt if u.kind == 'pokemon' else mins)[u.team] += 1
+                    if u.capturing is a:
+                        caps[u.team] += 1
+                elif u.capturing is a:
+                    u.capturing = None               # sorti du cercle (repoussé...) : capture interrompue
             a['count'] = cnt
             nr, nb = cnt['rouge'], cnt['bleu']
+            cr, cb = caps['rouge'], caps['bleu']      # seuls ceux qui capturent (touche) font avancer
             mr, mb = mins['rouge'], mins['bleu']
             rate = dt / C.CAPTURE_TIME
             if self.tower_up(a) and ((a['owner'] == 'rouge' and nb) or (a['owner'] == 'bleu' and nr)):
                 rate *= C.TOWER['capture_slow']          # la tour gêne la capture adverse
             # contestée : les deux équipes sont présentes (les sbires qui défendent comptent)
             a['contested'] = bool((nr or nb) and (nr or mr) and (nb or mb))
-            if nr and not nb and not mb:
-                bonus = 1 + C.CAPTURE_BONUS_PER_UNIT * (nr - 1) + C.MINION_CAPTURE * mr
+            if cr and not nb and not mb:
+                bonus = 1 + C.CAPTURE_BONUS_PER_UNIT * (cr - 1) + C.MINION_CAPTURE * mr
                 a['control'] = min(1.0, a['control'] + rate * bonus)
-            elif nb and not nr and not mr:
-                bonus = 1 + C.CAPTURE_BONUS_PER_UNIT * (nb - 1) + C.MINION_CAPTURE * mb
+            elif cb and not nr and not mr:
+                bonus = 1 + C.CAPTURE_BONUS_PER_UNIT * (cb - 1) + C.MINION_CAPTURE * mb
                 a['control'] = max(-1.0, a['control'] - rate * bonus)
-            elif not nr and not nb:        # sans personne, l'arène revient à l'état de son propriétaire
+            elif not cr and not cb:        # sans personne, l'arène revient à l'état de son propriétaire
                 goal = 1.0 if a['owner'] == 'rouge' else -1.0 if a['owner'] == 'bleu' else 0.0
                 step = rate * C.CAPTURE_DECAY
                 a['control'] += max(-step, min(step, goal - a['control']))
@@ -1270,6 +1445,9 @@ class Match(Entity):
                             self.reward(u, C.XP_CAPTURE, C.GOLD_CAPTURE)
                         else:
                             self.reward(u, 0, C.GOLD_CAPTURE_TEAM)
+            for u in self.units:                 # arène entièrement prise : les capteurs sont libérés
+                if u.capturing is a and self.capture_spot(u) is not a:
+                    u.capturing = None
             self._paint_arena(a)
         for team in TEAM_KEYS:                   # points des arènes tenues (rendement décroissant)
             n = sum(1 for a in self.arenas if a['owner'] == team)
@@ -1286,6 +1464,14 @@ class Match(Entity):
             col = color.rgb(1, 1, 1)
         a['ring'].color = col
         a['crystal'].color = C.TEAMS[a['owner']]['color'] if a['owner'] else lerp(NEUTRAL_RING, lead, abs(c) * .6)
+        border = a['district']                     # bord du quartier : couleur de l'équipe qui tient l'arène
+        if (border.enabled, getattr(border, 'owner', None)) != (a['owner'] is not None, a['owner']):
+            border.owner = a['owner']
+            border.enabled = a['owner'] is not None
+            if a['owner']:
+                tc = C.TEAMS[a['owner']]['light']
+                border.color = color.rgba(tc[0], tc[1], tc[2], .95)
+                border.fill.color = color.rgba(1, 1, 1, .12)       # (teinte héritée du liseré)
 
     def _arena_event(self, a, old):
         if a['owner']:
@@ -1580,6 +1766,7 @@ class Match(Entity):
 
     # ================================================================ interface
     def _build_hud(self):
+        """Interface de la partie (générateur : quelques étapes, pour l'écran de chargement)."""
         ui = self.ui = Entity(parent=camera.ui)
         # --- score
         W = .64
@@ -1612,6 +1799,7 @@ class Match(Entity):
             prog = Entity(parent=ui, model='quad', color=color.white, origin=(-.5, 0), position=(x - .025, .302),
                           scale=(0, .006))
             self.arena_icons.append((fill, prog))
+        yield
         # --- mini-carte
         # mini-carte réduite, calée dans le coin supérieur droit (elle ne masque plus le jeu)
         self.map_root = Entity(parent=ui, position=(.735, .345), scale=.66)
@@ -1648,6 +1836,7 @@ class Match(Entity):
                                 position=(p['pos'].x * self.map_s, p['pos'].z * self.map_s, .004)) for p in self.pads]
         self.map_minions = {u: Entity(parent=self.map_root, model='quad', color=C.TEAMS[u.team]['light'], scale=.006,
                                       z=-.005, enabled=False) for u in self.units if u.kind == 'minion'}
+        yield
         # Pokémon des équipes : leur portrait dans un médaillon aux couleurs de l'équipe
         self.portraits = Portraits([f for u in self.units if u.kind == 'pokemon'
                                     for f in C.evolution_line(u.species) + ([C.MEGA_FORMS[u.species]]
@@ -1662,6 +1851,7 @@ class Match(Entity):
                 Entity(parent=icon, model='circle', color=color.rgb(.08, .09, .14), scale=s * .8, z=-.001)
                 self.map_faces[u] = self.portraits.icon(icon, u.form, scale=s * .95, z=-.002)
                 self.map_units[u] = icon
+        yield
         # --- joueur
         from game.interface.hud import ArenaCard, CountdownCard, InfoCard, PillRow
         from game.interface.style import F_BOLD, F_SEMI, rounded
@@ -1704,6 +1894,7 @@ class Match(Entity):
                                   position=(.014, -.05, -.02), scale=(.272, .012))
         self.ping_text = Text(parent=ui, text='', position=(-.87, .215), origin=(-.5, 0), scale=.75,
                               color=color.rgba(1, 1, 1, .7)) if self.net is not None else None
+        yield
         # --- attaques
         self.slots = {}
         x0 = -.8
@@ -1712,7 +1903,8 @@ class Match(Entity):
         K = {k: key_label(v) for k, v in C.KEYS.items()}
         Text(parent=ui, text=f"Clic : se déplacer / attaquer   {K['auto']} auto-attaque   "
                              f"{K[1]} {K[2]} {K[3]} {K[4]} attaques, {K['ult']} ultime "
-                             f"(maintenir pour viser, relâcher pour lancer)   {key_label(C.TRANSFORM_KEY)} transformation"
+                             f"(maintenir pour viser, relâcher pour lancer)   {key_label(C.TRANSFORM_KEY)} transformation   "
+                             f"{key_label(C.CAPTURE_KEY)} capturer"
                              "   Espace esquive   B boutique   Tab carte",
              position=(x0 - .06, -.478), scale=.62, color=color.rgba(1, 1, 1, .7), **F_SEMI)
         self.cam_hint = Text(parent=ui, text='', position=(0, .215), origin=(0, 0), scale=.9,
@@ -1769,8 +1961,8 @@ class Match(Entity):
         i = np.clip(np.round((X - st.j_min) / .5).astype(int), 0, st.j_n - 1)
         j = np.clip(np.round((Z - st.j_min) / .5).astype(int), 0, st.j_n - 1)
         W = biomes.weights_np(X, Z)[..., None]
-        ground = (np.array(MAP_GROUND) * W).sum(-2)
-        massif = (np.array(MAP_MASSIF) * W).sum(-2)
+        ground = (np.array(biomes.by_slot(MAP_GROUND)) * W).sum(-2)
+        massif = (np.array(biomes.by_slot(MAP_MASSIF)) * W).sum(-2)
         img = np.zeros((n, n, 4), np.uint8)
         img[..., :3] = np.where((sdf > 0)[..., None], massif, ground).astype(np.uint8)
         img[..., 3] = np.where(sdf > 0, 245, 235)
@@ -1793,7 +1985,7 @@ class Match(Entity):
         self._set_text(self.timer_text, f'{int(left // 60):02d}:{int(left % 60):02d}')
         for a, wx in zip(self.arenas, self.map_weather):
             c = C.TEAMS[a['owner']]['color'] if a['owner'] else None
-            wx.color = color.rgba(c[0], c[1], c[2], .16) if c else color.rgba(1, 1, 1, 0)
+            wx.color = color.rgba(c[0], c[1], c[2], .3) if c else color.rgba(1, 1, 1, 0)
         for a, (fill, prog), dot in zip(self.arenas, self.arena_icons, self.map_arenas):
             c = a['control']
             col = C.TEAMS[a['owner']]['color'] if a['owner'] else lerp(NEUTRAL_RING, C.TEAMS['rouge' if c > 0 else 'bleu']['color'], abs(c) * .5)

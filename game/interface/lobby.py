@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from ursina import (Button, Entity, InputField, Quad, Text, Texture, Vec3, application, camera, color, destroy,
+from ursina import (Button, Circle, Entity, InputField, Quad, Text, Texture, Vec3, application, camera, color, destroy,
                     lerp, time as utime)
 from ursina.shaders import unlit_shader
 
@@ -308,6 +308,8 @@ class Lobby(Entity):
         self.ping_ms = None
         self._ping_t = 0.0
         self._starting = False
+        self.preload = None                # carte de la partie, construite en arrière-plan (world/preload.py)
+        self.map_view = None               # grande carte ouverte par un clic sur le bandeau
         self.ai = getattr(game, 'ai_level', 'facile')    # niveau des Pokémon de l'ordinateur (choisi par l'hôte)
         self.cards = None
         self._info_species = None
@@ -446,7 +448,7 @@ class Lobby(Entity):
         self.other_label = Entity(parent=ui, position=(-.56, -.15))
         # invitation (hôte, tant que personne n'a rejoint)
         if self.mode != 'guest':
-            self.seed = random.randrange(1 << 30)   # tirage des alliés de l'IA, montré dans le salon
+            self.seed = random.randrange(1 << 30)   # tirage des alliés de l'IA et de la carte, montré dans le salon
         self.team_panel = Entity(parent=ui, position=(-.62, .255))
         self._team_sig = None
         self.invite = panel(ui, (-.6, -.03), .44, .36)
@@ -473,7 +475,13 @@ class Lobby(Entity):
         n = len(C.PLAYABLE)
         w, h, gap = (.15, .165, .016) if n <= 8 else (.098, .13, .008)     # 16 Pokémon : cartes compactes
         for i, sp in enumerate(C.PLAYABLE):
-            self.cards[sp] = self._card(ui, sp, ((i - (n - 1) / 2) * (w + gap), -.33), w, h)
+            self.cards[sp] = self._card(ui, sp, ((i - (n - 1) / 2) * (w + gap), -.345), w, h)
+        # carte tirée pour la partie (types des arènes) : bandeau au-dessus des cartes
+        self.map_strip = Entity(parent=ui, position=(-.335, -.236))
+        self.map_status = None
+        self._map_sig = None
+        if self.mode != 'guest':
+            self._start_preload()
         # actions
         Btn(ui, 'Retour', (-.75, -.455), self.back, w=.15, h=.05, size=.85, col=color.rgba(.12, .12, .18, .9))
         label = 'LANCER LA PARTIE' if self.mode == 'solo' else 'PRÊT !'
@@ -677,6 +685,7 @@ class Lobby(Entity):
 
     def back(self):
         self._close_net(notify=True)
+        self._cancel_preload()
         self.mode = None
         self.show_home()
 
@@ -704,14 +713,14 @@ class Lobby(Entity):
             self.link.send({'t': 'lobby', 'host': {'sp': self.pick['me'], 'ready': self.ready['me'],
                                                    'b': self.build['me']},
                             'guest': {'sp': self.pick['other'], 'ready': self.ready['other']},
-                            'ping': self.ping_ms, 'ai': self.ai, 'seed': self.seed})
+                            'ping': self.ping_ms, 'ai': self.ai, 'seed': self.seed, 'map': self._world()})
             if self.ready['me'] and self.ready['other'] and self.pick['other']:
                 self._host_start()
 
     def _host_start(self):
         humans = [self.pick['me'], self.pick['other']]
         builds = [self.build['me'], self.build['other']]
-        world = {'tree_spacing': C.QUALITY['tree_spacing'], 'relief': C.QUALITY['relief']}
+        world = self._world()
         seed = self.seed                            # même tirage des Pokémon de l'IA sur les deux PC (vu au salon)
         self.link.send({'t': 'start', 'humans': humans, 'builds': builds, 'map': world, 'seed': seed})
         self._launch(humans, 0, 'host', seed, builds)
@@ -720,8 +729,12 @@ class Lobby(Entity):
         if self._starting:
             return
         self._starting = True
+        if self.preload is not None and self.preload.seed != seed:
+            self.preload.cancel()                  # (graine différente : ne devrait pas arriver)
+            self.preload = None
         setup = {'humans': humans, 'local': local, 'role': role, 'host': self.host, 'link': self.link, 'seed': seed,
-                 'ai': self.ai, 'builds': builds or ['standard'] * len(humans)}
+                 'ai': self.ai, 'builds': builds or ['standard'] * len(humans), 'preload': self.preload}
+        self.preload = None                        # la partie reprend la carte (finie ou presque)
         self.host = self.guest = self.link = None      # la partie prend la main sur la connexion
         self.game.start_match(setup)
 
@@ -846,7 +859,9 @@ class Lobby(Entity):
                 self.ready['me'] = bool(gs.get('ready'))
                 self.ping_ms = msg.get('ping')
                 if isinstance(msg.get('seed'), int):
+                    self._apply_world(msg.get('map'))
                     self.seed = msg['seed']
+                    self._start_preload()          # même graine que l'hôte : même carte
                 if msg.get('ai') in ('facile', 'expert'):
                     self.ai = msg['ai']
                     self._refresh_ai()
@@ -855,9 +870,7 @@ class Lobby(Entity):
                 humans = [s for s in msg.get('humans', ()) if s in C.PLAYABLE]
                 if len(humans) != 2:
                     continue
-                for k, v in (msg.get('map') or {}).items():
-                    if k in ('tree_spacing', 'relief') and isinstance(v, (int, float)):
-                        C.QUALITY[k] = float(v)     # même jungle et même relief que l'hôte
+                self._apply_world(msg.get('map'))
                 seed = msg.get('seed', 0)
                 builds = msg.get('builds') or ['standard', 'standard']
                 builds = [b if isinstance(b, str) and b in [k for k, _, _ in kit.builds_for(s)] else 'standard'
@@ -900,6 +913,7 @@ class Lobby(Entity):
             self._build_info(me)
         self._player_tag(self.me_label, self.me_tag, me, self.ready['me'] and duo, True)
         self._refresh_team()
+        self._refresh_map()
         if not duo:
             for c in list(self.other_label.children):
                 destroy_tree(c)
@@ -994,6 +1008,121 @@ class Lobby(Entity):
             self.net_status.text = st
             self.net_status.color = OK_GREEN if h.info['upnp'] else DIM
 
+    # ================================================================ carte tirée
+    @staticmethod
+    def _world():
+        """Réglages qui changent la carte (densité de la jungle, relief) : ceux de l'hôte font foi."""
+        return {'tree_spacing': C.QUALITY['tree_spacing'], 'relief': C.QUALITY['relief']}
+
+    @staticmethod
+    def _apply_world(world):
+        for k, v in (world or {}).items():
+            if k in ('tree_spacing', 'relief') and isinstance(v, (int, float)):
+                C.QUALITY[k] = float(v)     # même jungle et même relief que l'hôte
+
+    def _start_preload(self):
+        """Tire la carte de la graine du salon et commence à la construire en arrière-plan."""
+        if self.preload is not None and self.preload.seed == self.seed:
+            return
+        self._cancel_preload()
+        from game.world.preload import MapPreload
+        self.preload = MapPreload(self.seed)
+        self._map_sig = None
+        self._refresh_map()
+
+    def _cancel_preload(self):
+        if self.preload is not None:
+            self.preload.cancel()
+            self.preload = None
+
+    def _refresh_map(self):
+        """Bandeau de la carte tirée : type, météo et bonus de chaque arène ; case dorée pour les arènes dont la
+        météo renforce le type du Pokémon choisi (case dorée, « + »)."""
+        strip = getattr(self, 'map_strip', None)
+        if strip is None:
+            return
+        types = self.preload.types if self.preload is not None else None
+        ptype = C.SPECIES[self.pick['me']]['type']
+        sig = (tuple(sorted(types.items())) if types else None, ptype)
+        if sig == self._map_sig:
+            return
+        self._map_sig = sig
+        for c in list(strip.children):
+            destroy_tree(c)
+        W, H = 1.07, .052
+        Entity(parent=strip, model=_quad(W + .005, H + .005, .0145), scale=(W + .005, H + .005), color=PANEL_EDGE,
+               z=.01)
+        Button(parent=strip, model=_quad(W, H, .012), scale=(W, H), color=PANEL, highlight_color=PANEL.tint(.06),
+               pressed_color=PANEL.tint(-.04), on_click=self._open_map, z=.005)
+        Text(parent=strip, text='CARTE', position=(-W / 2 + .018, .009), origin=(-.5, 0), scale=.78, color=GOLD,
+             **F_BOLD)
+        self.map_status = Text(parent=strip, text='', position=(-W / 2 + .018, -.011), origin=(-.5, 0), scale=.56,
+                               color=DIM, **F_SEMI)
+        if not types:
+            Text(parent=strip, text="En attente de l'hôte : la carte sera tirée avec la partie", position=(0, 0),
+                 origin=(0, 0), scale=.75, color=DIM, **F_SEMI)
+            return
+        cw, x = .182, -W / 2 + .125
+        for a in C.ARENAS:
+            t = types[a['key']]
+            tc = C.TYPES[t]
+            wx = C.WEATHERS[C.WEATHER_OF[t]]
+            boost = ptype in wx.get('boost', {})
+            chip_ = Entity(parent=strip, position=(x + cw / 2, 0, -.01))
+            if boost:                              # la météo de cette arène renforce votre Pokémon
+                Entity(parent=chip_, model=_quad(cw - .004, H - .01, .01), scale=(cw - .004, H - .01), color=GOLD,
+                       z=.002)
+            Entity(parent=chip_, model=_quad(cw - .01, H - .016, .008), scale=(cw - .01, H - .016),
+                   color=lerp(tc['dark'], color.black, .35), z=.001)
+            Entity(parent=chip_, model=Circle(6), rotation_z=30, scale=.026, x=-cw / 2 + .022, color=tc['color'])
+            Text(parent=chip_, text=tc['name'], position=(-cw / 2 + .042, .008), origin=(-.5, 0), scale=.74,
+                 color=tc['light'], **F_BOLD)
+            Text(parent=chip_, text=a['place'], position=(cw / 2 - .012, .008), origin=(.5, 0), scale=.5, color=DIM,
+                 **F_SEMI)
+            Text(parent=chip_, text=('+ ' if boost else '') + wx['name'], position=(-cw / 2 + .042, -.011),
+                 origin=(-.5, 0), scale=.54, color=GOLD if boost else color.rgba(1, 1, 1, .75), **F_SEMI)
+            x += cw + .004
+        self._refresh_map_status()
+
+    def _refresh_map_status(self):
+        if self.map_status is None or self.preload is None:
+            return
+        txt = 'Carte prête' if self.preload.done else f'Préparation {int(self.preload.progress * 100)} %'
+        if self.map_status.text != txt:
+            self.map_status.text = txt
+            self.map_status.color = OK_GREEN if self.preload.done else DIM
+
+    def _open_map(self):
+        """Grande carte tirée (clic sur le bandeau ; un clic ou Échap la referme)."""
+        if self.preload is None or self.map_view is not None:
+            return
+        from game.interface.loading import MapFigure
+        types = self.preload.types
+        v = self.map_view = Entity(parent=camera.ui, z=-2)
+        Entity(parent=v, model='quad', scale=(4, 2), color=color.rgba(0, 0, 0, .72), z=.02)
+        panel(v, (0, 0), 1.3, .78, col=color.rgba(.05, .06, .13, .97))
+        Text(parent=v, text='CARTE TIRÉE POUR CETTE PARTIE', position=(0, .345, -.02), origin=(0, 0), scale=1.25,
+             color=GOLD, **F_BOLD)
+        MapFigure(v, types, .27, position=(-.33, -.02), z=-.02)
+        y = .25
+        ptype = C.SPECIES[self.pick['me']]['type']
+        for a in C.ARENAS:
+            t = types[a['key']]
+            tc = C.TYPES[t]
+            wx = C.WEATHERS[C.WEATHER_OF[t]]
+            star = '+ ' if ptype in wx.get('boost', {}) else ''
+            Text(parent=v, text=f"{star}Arène {tc['name']}  ({a['place']})", position=(.02, y, -.02),
+                 origin=(-.5, 0), scale=1.05, color=tc['light'], **F_BOLD)
+            Text(parent=v, text=f"{wx['name']} : {wx['desc']}", position=(.02, y - .032, -.02), origin=(-.5, 0),
+                 scale=.72, color=color.rgba(1, 1, 1, .85), **F_SEMI)
+            Text(parent=v, text=f"Bonus d'équipe : {C.ARENA_BONUS[t][2]}", position=(.02, y - .058, -.02),
+                 origin=(-.5, 0), scale=.68, color=DIM, **F_SEMI)
+            y -= .11
+        name = C.SPECIES[self.pick['me']]['name']
+        Text(parent=v, text=f"+ : la météo de l'arène renforce les attaques de {name}"
+                            '   \u00b7   clic ou Échap pour fermer', position=(0, -.355, -.02), origin=(0, 0),
+             scale=.7, color=DIM, **F_SEMI)
+
     # ================================================================ boucle
     def update(self):
         dt = utime.dt
@@ -1005,6 +1134,9 @@ class Lobby(Entity):
             self.carousel.update(dt)
             self._refresh_front()
         self.sparkles.update(dt)
+        if self.preload is not None:
+            self.preload.pump(.004)                # la carte se construit pendant le choix des Pokémon
+            self._refresh_map_status()
         if self._starting:
             return
         if self.mode == 'host' and self.host is not None:
@@ -1024,6 +1156,11 @@ class Lobby(Entity):
                 self.ping_text.text = txt
 
     def input(self, key):
+        if self.map_view is not None:
+            if key in ('escape', 'left mouse down', 'right mouse down'):
+                destroy_tree(self.map_view)
+                self.map_view = None
+            return
         if self.mode in ('solo', 'host', 'guest') and not self._starting:
             i = C.PLAYABLE.index(self.pick['me'])
             if key in ('left arrow', 'q', 'a'):
@@ -1041,6 +1178,9 @@ class Lobby(Entity):
     def close(self):
         """Supprime le salon (la connexion, elle, a été confiée à la partie)."""
         self._close_net()
+        self._cancel_preload()
+        if self.map_view is not None:
+            destroy_tree(self.map_view)
         self.portraits.dispose()
         self.game.sky.enabled = True
         destroy_tree(self.ui)

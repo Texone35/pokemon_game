@@ -5,12 +5,86 @@ Tous les décors et les Pokémon sont construits à partir de primitives
 groupe grâce à MeshBuilder. Un maillage = un appel de rendu, ce qui garde le
 jeu fluide même avec des centaines d'arbres.
 """
+import functools
 import math
+import queue
+import threading
+import time
 
 import numpy as np
 
 from game import config as C
 from ursina import Entity, Shader, Vec3, Vec4, color
+
+
+# --------------------------------------------------------------------------
+# Construction en arrière-plan : la carte peut se construire dans un fil séparé (pendant le salon).
+# Tout le calcul s'y fait ; seules les créations de nœuds Panda3D / d'entités Ursina (décorées par
+# @on_main) passent par le fil principal, qui les exécute petit à petit avec pump().
+# --------------------------------------------------------------------------
+class Cancelled(Exception):
+    """La construction en arrière-plan a été abandonnée (retour au menu, nouvelle carte)."""
+
+
+_CALLS = queue.SimpleQueue()
+# Partage du temps : un fil en arrière-plan travaille au plus BREATHE[0] secondes d'affilée puis se met en
+# pause BREATHE[1] secondes (le fil principal affiche alors ses images sans attendre). Pause à 0 quand
+# le fil principal n'a rien d'autre à faire (écran de chargement).
+BREATHE = [.004, .004]
+_work_start = [0.0]
+
+
+def breathe():
+    """Point de pause d'une construction en arrière-plan (sans effet sur le fil principal)."""
+    th = threading.current_thread()
+    if th is threading.main_thread():
+        return
+    if getattr(th, 'cancelled', False):
+        raise Cancelled()                     # construction abandonnée : le fil s'arrête au plus vite
+    if BREATHE[1] <= 0:
+        return
+    now = time.perf_counter()
+    if now - _work_start[0] > BREATHE[0]:
+        time.sleep(BREATHE[1])
+        _work_start[0] = time.perf_counter()
+
+
+def on_main(fn):
+    """Décorateur : appelée depuis un autre fil, la fonction attend son tour sur le fil principal."""
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        th = threading.current_thread()
+        if th is threading.main_thread():
+            return fn(*a, **k)
+        box, done = [None, None], threading.Event()
+        _CALLS.put((th, fn, a, k, box, done))
+        while not done.wait(.05):
+            if getattr(th, 'cancelled', False):
+                raise Cancelled()
+        if box[1] is not None:
+            raise box[1]
+        return box[0]
+    return wrapper
+
+
+def pump(budget=.006, wait=False):
+    """Fil principal (à chaque image) : exécute les créations demandées, pendant `budget` secondes au plus.
+    wait=True : en attendant une demande, le fil principal dort (le calcul en arrière-plan va plus vite)."""
+    end = time.perf_counter() + budget
+    while True:
+        try:
+            left = end - time.perf_counter()
+            th, fn, a, k, box, done = _CALLS.get(timeout=left) if wait and left > 0 else _CALLS.get_nowait()
+        except queue.Empty:
+            return
+        if not getattr(th, 'cancelled', False):
+            try:
+                box[0] = fn(*a, **k)
+            except BaseException as e:          # renvoyée au fil qui a demandé
+                box[1] = e
+        done.set()
+        if time.perf_counter() > end:
+            return
 
 
 # --------------------------------------------------------------------------
@@ -481,6 +555,7 @@ class MeshBuilder:
         volume : (x, y, z, force) : oriente les normales depuis ce centre ; plusieurs touffes d'un même
                  feuillage s'éclairent alors comme un seul volume doux (au lieu d'une grappe de boules)
         """
+        breathe()
         v, t, n = PRIMS[prim]
         s = np.array(scale if isinstance(scale, (tuple, list)) else (scale,) * 3, float)
         m = _rot_matrix(rot)
@@ -556,14 +631,15 @@ class MeshBuilder:
 
         Ursina parcourt toutes ses entités à chaque image : pour le décor immobile
         et les petits éléments animés à la main, un nœud nu est bien plus léger.
+        (Depuis un fil en arrière-plan, tout se prépare sur ce fil : seul l'accrochage à la scène
+        passe par le fil principal.)
         """
         from panda3d.core import TransparencyAttrib
         node = self.build()
         if node is None:
             return None
         if not toon_shader.compiled:
-            toon_shader.compile()
-        node.reparent_to(parent)
+            on_main(toon_shader.compile)()
         node.set_shader(toon_shader._shader)
         node.set_shader_input('flash', Vec4(1, 1, 1, 0))
         node.set_shader_input('emissive', float(emissive))
@@ -578,6 +654,7 @@ class MeshBuilder:
         node.set_transparency(TransparencyAttrib.M_alpha if transparent else TransparencyAttrib.M_none)
         if col is not None:
             node.set_color_scale(Vec4(*col))
+        on_main(node.reparent_to)(parent)
         return node
 
     def outline(self, thickness, col=(0.08, 0.07, 0.1, 1), min_size=.1):
@@ -597,7 +674,12 @@ class MeshBuilder:
         return o
 
     def entity(self, parent=None, emissive=0.0, transparent=False, double_sided=True, **kwargs):
-        e = Entity(parent=parent, model=self.build(), shader=toon_shader, double_sided=double_sided, **kwargs)
+        return self._entity(self.build(), parent, emissive, transparent, double_sided, **kwargs)
+
+    @staticmethod
+    @on_main
+    def _entity(model, parent, emissive, transparent, double_sided, **kwargs):
+        e = Entity(parent=parent, model=model, shader=toon_shader, double_sided=double_sided, **kwargs)
         if not transparent:
             # Ursina active par défaut une transparence qui dessine tout deux fois : inutile ici
             from panda3d.core import TransparencyAttrib

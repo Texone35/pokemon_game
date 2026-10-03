@@ -1,11 +1,12 @@
 """Grands décors de la carte : un repère visuel fort par zone (voir biomes.py).
 
-  Nord (roche)         : arches naturelles de grès sur le plateau
-  Ouest (plante)       : arbre millénaire
-  Est (electrik)       : tour Tesla et ligne à haute tension
-  Sud-Ouest (eau)      : colline aux cascades et son bassin, bosquet de cristaux géants
-  Sud-Est (feu)        : volcan (cratère de lave, coulées), chute de lave, cheminées volcaniques
-  près du Boss Pit     : ruines d'un temple envahi par la végétation (de part et d'autre)
+Chaque arène pose le grand décor de son type (tiré en début de partie) dans son secteur :
+  roche    : arches naturelles de grès
+  plante   : arbre millénaire
+  electrik : tour Tesla et ligne à haute tension
+  eau      : colline aux cascades et son bassin, petite cascade, bosquet de cristaux géants
+  feu      : volcan (cratère de lave, coulées), chute de lave, cheminées volcaniques
+  près du Boss Pit : ruines d'un temple envahi par la végétation (de part et d'autre)
 
 Tous sont posés au cœur des massifs de la jungle (jamais dans un passage) : ils ne changent
 ni les collisions ni la navigation. Certains modèlent le relief (volcan, colline, bassin) :
@@ -25,6 +26,14 @@ STONE = color.rgb(.62, .6, .53)
 MOSS = color.rgb(.3, .45, .2)
 LAVA, LAVA_HOT = biomes.LAVA, biomes.LAVA_HOT
 PSY = color.rgb(.75, .45, 1)
+
+
+# emplacements des grands décors de chaque secteur (au cœur des massifs) : (main, side, inner)
+_W = {'nord': ((-22, 107), (22, 107), None),
+      'ouest': ((-97.5, 48.5), (-108, 26), (-110, 5.5)),
+      'sud_ouest': ((-86, -50), (-105, -33.5), (-20, -81))}
+ANCHORS = dict(_W, est=tuple(p and (-p[0], p[1]) for p in _W['ouest']),
+               sud_est=tuple(p and (-p[0], p[1]) for p in _W['sud_ouest']))
 
 
 class Landmarks:
@@ -62,48 +71,14 @@ class Landmarks:
         """Choisit les emplacements et déclare les reliefs (avant la carte des hauteurs)."""
         st = self.st
         marks = st.terrain_marks
-        # volcan (Sud-Est) et colline aux cascades (Sud-Ouest), en miroir
-        x, z, d = self._deep(39, -52)
-        r = min(d + 1.5, 11)
-        self._add('volcano', x, z, r)
-        marks.append((x, z, r, lambda t: 6.2 * _smoothstep(1, .28, t) - 2.2 * _smoothstep(.26, .06, t), 'add'))
-        x, z, d = self._deep(-39, -52)
-        r = min(d + 1, 10)
-        side = self._side(x, z, r * .62)
-        px, pz = polar(side, r * .62, x, z)
-        self._add('falls', x, z, r * .5, side=side, pool=(px, pz, 2.6), big=True, lip=r * .27)
-        marks.append((x, z, r * .55, lambda t: 5.0 * _smoothstep(1, .45, t), 'add'))
-        marks.append((px, pz, 3.4, lambda t: (1.0, _smoothstep(1, .75, t)), 'flat'))
-        # petite cascade (Sud-Ouest) et chute de lave (Sud-Est), en miroir
-        for kind, sx in (('falls', -1), ('lavafall', 1)):
-            x, z, d = self._deep(105 * sx, -33.5, 6)
-            r = min(d + .5, 6.5)
-            side = self._side(x, z, r * .7)
-            px, pz = polar(side, r * .7, x, z)
-            self._add(kind, x, z, r * .45, side=side, pool=(px, pz, 1.9), big=False, lip=r * .22)
-            marks.append((x, z, r * .5, lambda t: 3.6 * _smoothstep(1, .4, t), 'add'))
-            marks.append((px, pz, 2.6, lambda t: (1.0, _smoothstep(1, .72, t)), 'flat'))
-        # arbre millénaire (Ouest) et tour Tesla (Est)
-        x, z, d = self._deep(-97.5, 48.5, 8)
-        self._add('giant_tree', x, z, min(d, 7))
-        x, z, d = self._deep(97.5, 48.5, 8)
-        self._add('tesla', x, z, 3.5)
-        line = [(x, z)]
-        for tx, tz in ((108, 26), (110, 5.5), (104, -16)):
-            px, pz, dd = self._deep(tx, tz, 7)
-            if dd > 2.2:
-                line.append((px, pz))
-        self.power_line = line
-        for px, pz in line[1:]:
-            self._add('pylon', px, pz, 2.0)
+        # grand décor du thème de chaque arène, aux emplacements de son secteur (voir ANCHORS)
+        self.power_line = None
+        for a in C.ARENAS:
+            getattr(self, 'plan_' + a['type'])(*ANCHORS[a['key']])
         # ruines envahies par la végétation, de part et d'autre du Boss Pit
         for sx in (-1, 1):
             x, z, d = self._deep(21.5 * sx, 21, 6)
             self._add('ruins', x, z, min(d - .5, 6.5))
-        # arches de grès sur le plateau Nord
-        for sx in (-1, 1):
-            x, z, d = self._deep(22 * sx, 107, 6)
-            self._add('arch', x, z, min(d, 5.5), yaw=90 + 25 * sx)
         # antre de Torterra : porte en ruine envahie de racines et grand arbre, derrière chaque camp
         for i, camp in enumerate(C.CAMPS):
             if camp.get('buff') != 'bastion':
@@ -114,11 +89,73 @@ class Landmarks:
             back = self._side(cx, cz, 10, prefer=away)
             tx, tz, d = self._deep(*polar(back, 11, cx, cz), 5)
             self._add('torterra', cx, cz, 0, back=back, tree=(tx, tz, d))
-        # cristaux géants (Sud-Ouest) et cheminées volcaniques (Sud-Est)
-        x, z, d = self._deep(-20, -81, 6)
-        self._add('crystal_grove', x, z, min(d, 5))
-        x, z, d = self._deep(20, -81, 6)
-        self._add('vents', x, z, min(d, 5))
+
+    # ------------------------------------------------------------ thèmes : un plan_<type> par thème
+    # main : grand emplacement (zone extérieure du secteur) ; side, inner : petits emplacements (ou None)
+    def plan_roche(self, main, side, inner):
+        """Arches naturelles de grès."""
+        for p in (main, side):
+            x, z, d = self._deep(*p, 6)
+            self._add('arch', x, z, min(d, 5.5), yaw=90 + 25 * (1 if p[0] > 0 else -1))
+
+    def plan_plante(self, main, side, inner):
+        """Arbre millénaire."""
+        x, z, d = self._deep(*main, 8)
+        self._add('giant_tree', x, z, min(d, 7))
+
+    def plan_electrik(self, main, side, inner):
+        """Tour Tesla et ligne à haute tension."""
+        x, z, d = self._deep(*main, 8)
+        self._add('tesla', x, z, 3.5)
+        line = [(x, z)]
+        for p in (side, inner):
+            if p is None:
+                continue
+            px, pz, dd = self._deep(*p, 7)
+            if dd > 2.2:
+                line.append((px, pz))
+                self._add('pylon', px, pz, 2.0)
+        self.power_line = line
+
+    def plan_eau(self, main, side, inner):
+        """Colline aux cascades et son bassin, petite cascade, bosquet de cristaux géants."""
+        marks = self.st.terrain_marks
+        x, z, d = self._deep(*main)
+        r = min(d + 1, 10)
+        sd = self._side(x, z, r * .62)
+        px, pz = polar(sd, r * .62, x, z)
+        self._add('falls', x, z, r * .5, side=sd, pool=(px, pz, 2.6), big=True, lip=r * .27)
+        marks.append((x, z, r * .55, lambda t: 5.0 * _smoothstep(1, .45, t), 'add'))
+        marks.append((px, pz, 3.4, lambda t: (1.0, _smoothstep(1, .75, t)), 'flat'))
+        self._small_fall('falls', side)
+        if inner is not None:
+            x, z, d = self._deep(*inner, 6)
+            self._add('crystal_grove', x, z, min(d, 5))
+
+    def plan_feu(self, main, side, inner):
+        """Volcan (cratère de lave, coulées), chute de lave, cheminées volcaniques."""
+        x, z, d = self._deep(*main)
+        r = min(d + 1.5, 11)
+        self._add('volcano', x, z, r)
+        self.st.terrain_marks.append(
+            (x, z, r, lambda t: 6.2 * _smoothstep(1, .28, t) - 2.2 * _smoothstep(.26, .06, t), 'add'))
+        self._small_fall('lavafall', side)
+        if inner is not None:
+            x, z, d = self._deep(*inner, 6)
+            self._add('vents', x, z, min(d, 5))
+
+    def _small_fall(self, kind, p):
+        """Petite cascade (d'eau ou de lave) et son bassin."""
+        if p is None:
+            return
+        marks = self.st.terrain_marks
+        x, z, d = self._deep(*p, 6)
+        r = min(d + .5, 6.5)
+        sd = self._side(x, z, r * .7)
+        px, pz = polar(sd, r * .7, x, z)
+        self._add(kind, x, z, r * .45, side=sd, pool=(px, pz, 1.9), big=False, lip=r * .22)
+        marks.append((x, z, r * .5, lambda t: 3.6 * _smoothstep(1, .4, t), 'add'))
+        marks.append((px, pz, 2.6, lambda t: (1.0, _smoothstep(1, .72, t)), 'flat'))
 
     def reserved(self, x, z):
         """Vrai si (x, z) est occupé par un grand décor (pas d'arbre de la jungle ici)."""
@@ -494,3 +531,8 @@ class Landmarks:
             t = rng.uniform(.5, .9)
             b.add(rng.choice(ROCKS), (px, t * .3, pz), (t * 1.8, t * 1.1, t * 1.4), rot=(0, rng.uniform(0, 360), 0),
                   col=shade(stone, .9), cap=(color.rgb(.3, .5, .22), .9))
+
+
+# thèmes ajoutés au tirage : un plan_<type> et les build_<genre> de leurs grands décors (voir themes.py)
+from game.world import themes  # noqa: E402
+themes.install_landmarks(Landmarks)

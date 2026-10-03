@@ -10,7 +10,7 @@ Lancer :  python main.py
 import atexit
 
 from panda3d.core import AntialiasAttrib, loadPrcFileData
-from ursina import Entity, Sky, Text, Ursina, camera, color, invoke, scene, window
+from ursina import Entity, Sky, Ursina, camera, color, scene, window
 
 from game import config as C
 # Anticrénelage matériel (MSAA) : très coûteux sur certaines puces graphiques
@@ -24,6 +24,7 @@ app = Ursina(title='Pokémon Dominion', size=C.WINDOW_SIZE, borderless=False,
              development_mode=False, vsync=True)
 
 # les modules suivants créent des shaders/entités : ils doivent être importés après Ursina()
+from game.interface.loading import LoadingScreen                                               # noqa: E402
 from game.interface.lobby import Lobby                                                         # noqa: E402
 from game.interface.widgets import Banner                                                      # noqa: E402
 from game.match import Match                                                                   # noqa: E402
@@ -52,20 +53,15 @@ class Game(Entity):
         atexit.register(self._shutdown)
 
     def start_match(self, setup):
-        """Quitte le salon et construit le stade (quelques secondes)."""
+        """Quitte le salon et construit la partie par petites étapes derrière l'écran de chargement (la
+        carte, elle, a en général fini de se construire pendant le choix des Pokémon)."""
         self.lobby.close()
         self.lobby = None
         unfreeze_shadows(self.sun)          # le stade calculera ses ombres puis les figera
-        self.loading = Text(parent=camera.ui, text='Chargement du stade...', origin=(0, 0), scale=2,
-                            color=color.rgb(1, .9, .5))
-        invoke(self._build_match, setup, delay=.05)       # laisse s'afficher le message d'abord
-
-    def _build_match(self, setup):
-        from ursina import destroy
         camera.fov = 70
-        self.match = Match(self, setup)
-        destroy(self.loading)
-        self.loading = None
+        self.match = Match(self, setup, defer=True)
+        types = setup['preload'].types if setup.get('preload') else C.draw_map(setup.get('seed') or 0)
+        self.loading = LoadingScreen(types)
 
     def back_to_menu(self, message=None):
         if self.match is not None:
@@ -89,6 +85,16 @@ class Game(Entity):
 
     def update(self):
         update_camera_uniform()
+        if self.loading is not None and self.match is not None:
+            from ursina import destroy, time as utime
+            ready = self.match.step(.012)               # une petite étape par image : l'écran reste animé
+            self.loading.set(1.0 if ready else self.match.load_progress,
+                             'Prêt !' if ready else self.match.load_label)
+            self.loading.tick(utime.dt)
+            if ready and self.loading.shown > .985:     # la barre a fini de se remplir : la partie commence
+                destroy(self.loading)
+                self.loading = None
+                self.match.enabled = True
 
 
 game = Game()

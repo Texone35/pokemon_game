@@ -1,4 +1,6 @@
-"""Décor des cinq arènes : chacune a son thème, reconnaissable au premier coup d'œil.
+"""Décor des arènes : chacune a le thème de son type (tiré en début de partie), reconnaissable au premier
+coup d'œil. Cinq thèmes sont construits ici à la main ; les treize autres types (glace, poison, spectre...)
+suivent un style par type décrit dans themes.py (ARENA).
 
   roche    : perchée sur un plateau de grès (falaises en colonnes, escalier et rampes : voir
              Stadium._build_plateaus), sol de terre battue en grandes dalles, bannières des équipes
@@ -23,7 +25,7 @@ from ursina import color
 from game import config as C
 from game.world.emblems import add_emblem
 from game.world.geometry import ROCKS, MeshBuilder, add_hex_band, add_hex_slab, glowing
-from game.world.stadium import BASALTS, LANES, SAND_TOP, polyline_dist
+from game.world.stadium import BASALTS, ROUTES, SAND_TOP, polyline_dist
 
 
 def rgb(r, g, b):
@@ -59,7 +61,7 @@ class ArenaDecor:
         for k in range(180):
             ang = k * 2
             x, z = polar(ang, r, self.x0, self.z0)
-            w = next((w for pts, w in LANES if polyline_dist(x, z, pts) < w / 2 + .1), None)
+            w = next((w for pts, w in ROUTES if polyline_dist(x, z, pts) < w / 2 + .1), None)
             hits.append((ang, w))
         gates, group = [], []
         start = next((i for i, (_, w) in enumerate(hits) if w is None), 0)
@@ -77,7 +79,7 @@ class ArenaDecor:
     @staticmethod
     def lane_gap(x, z):
         """Distance au bord de la voie la plus proche."""
-        return min(polyline_dist(x, z, pts) - w / 2 for pts, w in LANES)
+        return min(polyline_dist(x, z, pts) - w / 2 for pts, w in ROUTES)
 
     def near_gate(self, ang, margin=14):
         return any(abs((ang - g + 180) % 360 - 180) < margin for g, _ in self.gates)
@@ -704,3 +706,8 @@ class ArenaDecor:
                 glow.add('cone', (x, 2.5, z), (1.2, 1.7, 1.2), col=lava)
                 glow.add('cone', (x, 2.35, z), (.7, 1.3, .7), col=lava2)
                 self.st.block(x, z, .9)
+
+
+# thèmes ajoutés au tirage (glace, poison, spectre...) : un build_<type> chacun (voir themes.py)
+from game.world import themes  # noqa: E402
+themes.install_arenas(ArenaDecor)

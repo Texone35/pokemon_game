@@ -30,6 +30,9 @@ ap.add_argument('--no-waves', action='store_true', help='sans vagues de sbires (
 ap.add_argument('--profile', type=float, default=0.0, help='profile N secondes réelles en fin de partie')
 ap.add_argument('--census', action='store_true', help="détail des entités parcourues à chaque image")
 ap.add_argument('--click-test', action='store_true', help="teste le déplacement et l'attaque au clic")
+ap.add_argument('--map', default=None, help="impose les types des arènes : nord,ouest,est,sud_ouest,sud_est "
+                                             "(ex. glace,poison,psy,spectre,dragon)")
+ap.add_argument('--capture-test', action='store_true', help="teste la capture à la touche et le champ de force des bases")
 ap.add_argument('--bot-player', action='store_true', help="le Pokémon du joueur joue exactement comme une IA")
 ap.add_argument('--fast', action='store_true', help="n'affiche pas les images (simulation plus rapide)")
 ap.add_argument('--log', default=None, help='enregistre le déroulé de la partie (JSON) pour tools/balance_report.py')
@@ -88,7 +91,32 @@ class GameStub(Entity):
         update_camera_uniform()
 
 
+def check_themes():
+    """Chaque type d'arène tirable doit avoir tout son thème (sinon une partie planterait au tirage)."""
+    from game.world import biomes
+    from game.world.arenas import ArenaDecor
+    from game.world.landmarks import Landmarks
+    from game.world.stadium import FLORA_T, GREENS_T
+    from game import match as M
+    tables = {'LAWN_T': biomes.LAWN_T, 'TRAIL_T': biomes.TRAIL_T, 'FOREST_T': biomes.FOREST_T,
+              'ROCK_T': biomes.ROCK_T, 'BANK_T': biomes.BANK_T, 'RELIEF_T': biomes.RELIEF_T, 'GREENS_T': GREENS_T,
+              'FLORA_T': FLORA_T, 'MAP_GROUND': M.MAP_GROUND, 'MAP_MASSIF': M.MAP_MASSIF,
+              'WEATHER_OF': C.WEATHER_OF, 'ARENA_BONUS': C.ARENA_BONUS, 'TYPES': C.TYPES}
+    for t in C.ARENA_TYPES:
+        missing = [n for n, tb in tables.items() if t not in tb]
+        from game.world.fx import ArenaWeather
+        missing += [f for f, cls in (('build_' + t, ArenaDecor), ('plan_' + t, Landmarks),
+                                     ('_' + C.WEATHER_OF.get(t, '?'), ArenaWeather)) if not hasattr(cls, f)]
+        assert not missing, f'thème {t} incomplet : {missing}'
+        assert C.WEATHER_OF[t] in C.WEATHERS, f'météo inconnue pour {t}'
+    print(f'thèmes : {len(C.ARENA_TYPES)} types tirables complets', flush=True)
+
+
 def main():
+    check_themes()
+    if args.map:                                          # carte imposée (test d'un thème)
+        forced = dict(zip([a['key'] for a in C.ARENAS], args.map.split(',')))
+        C.draw_map = lambda seed: dict(forced)
     random.seed(args.seed)
     game = GameStub()
     camera.fov = 70
@@ -120,6 +148,9 @@ def main():
 
     if args.click_test:
         click_test(match)
+        return
+    if args.capture_test:
+        capture_test(match)
         return
 
     # FPS réels, en temps réel, au début de la partie (tous les Pokémon en jeu)
@@ -209,6 +240,10 @@ def shot(match):
             pl.brain.aiming = mv['slot']
             target = pl.position + pl.facing() * 8
             pl.brain.cursor = lambda: target
+    if os.environ.get('MAPVIEW'):                      # vue de toute la carte (touche Tab)
+        match.cam_mode = 'map'
+        for _ in range(60):
+            app.step()
     if args.shop:
         match.toggle_shop()
     if args.transform and pl.alive:
@@ -221,11 +256,53 @@ def shot(match):
         pl.reset(pos=Vec3(x, 0, z))
         pl.brain = PlayerBrain(pl, match)
         match.cam_target = Vec3(x, pl.position.y + 1.5, z)
+        match.cam_dist = float(os.environ.get('CAM_DIST', match.cam_dist))
     for _ in range(3):
         application.base.mainWinMinimized = False
         app.step()
     application.base.win.save_screenshot(Filename.from_os_specific(os.path.abspath(args.shot)))
     print('capture :', args.shot, flush=True)
+
+
+def capture_test(match):
+    """Capture à la touche (immobile, la tour ne vise plus le capteur) et base adverse infranchissable."""
+    from ursina import Vec3
+    from game.world.stadium import BASE_SHIELD
+    clock = ClockObject.getGlobalClock()
+    clock.setMode(ClockObject.MNonRealTime)
+    clock.setFrameRate(20)
+    for _ in range(10):
+        app.step()
+    pl = match.player
+    br = pl.brain = PlayerBrain(pl, match)
+    for u in match.units:                                # personne d'autre sur le terrain
+        if u is not pl and u.kind == 'pokemon':
+            match._despawn(u)
+            u.respawn_t = 1e9
+    a = next(a for a in match.arenas if a['key'] == 'sud_est')
+    pl.reset(pos=Vec3(a['pos'].x + 2, 0, a['pos'].z))
+    br.input(C.CAPTURE_KEY)
+    assert pl.capturing is a, 'la touche de capture ne lance pas la capture'
+    here = Vec3(pl.position)
+    br.input('space')                                    # (esquive refusée pendant la capture)
+    for _ in range(40):
+        app.step()
+    assert (pl.position - here).length() < .05, 'le Pokémon bouge pendant la capture'
+    assert a['control'] > .1, f"la capture n'avance pas ({a['control']:.2f})"
+    tw = next(t for t in match.units if t.kind == 'tower')
+    tw.team, tw.alive, tw.position = 'bleu', True, a['pos']
+    assert tw.brain.choose() is not pl, 'la tour vise le Pokémon qui capture'
+    br.input(C.CAPTURE_KEY)
+    assert pl.capturing is None, "la touche n'arrête pas la capture"
+    assert tw.brain.choose() is pl, 'la tour devrait viser le Pokémon (capture arrêtée)'
+    print(f"capture : OK (contrôle {a['control']:.2f} après 2 s)", flush=True)
+    bx, bz = C.TEAMS['bleu']['base']
+    pl.reset(pos=Vec3(bx - BASE_SHIELD - 3, 0, bz))
+    for _ in range(60):
+        pl.move(Vec3(1, 0, 0), 1 / 20)
+    d = (pl.position - Vec3(bx, pl.position.y, bz)).length()
+    assert d >= BASE_SHIELD, f'le Pokémon rouge entre dans la base bleue ({d:.1f} m du centre)'
+    print(f'champ de force : OK ({d:.1f} m du centre de la base adverse)', flush=True)
 
 
 def click_test(match):
